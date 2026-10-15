@@ -702,7 +702,9 @@ def discover_available_comics(
                     "synopsis": final_synopsis,
                     "archive_title": doc_title,
                     "identifier": ident,
-                    "is_fallback_pdf": (file_fmt == "PDF")
+                    "is_fallback_pdf": (file_fmt == "PDF"),
+                    "is_canonical": bool(matched_target),
+                    "canonical_title": matched_target.get("title") if matched_target else None
                 }
 
                 # If we haven't seen this issue/stem yet, or new format has higher priority (lower rank)
@@ -736,23 +738,72 @@ def discover_available_comics(
 # 4. Interactive Selection & Approval Gate ("Click Yes")
 # ===================================================================
 
+class CLITheme:
+    """Terminal styling, ANSI color palette, and visual badge helpers."""
+    if os.name == "nt":
+        try:
+            os.system("")
+        except Exception:
+            pass
+
+    USE_COLOR = sys.stdout.isatty() and not bool(os.getenv("NO_COLOR"))
+
+    CYAN = "\033[96m" if USE_COLOR else ""
+    GREEN = "\033[92m" if USE_COLOR else ""
+    YELLOW = "\033[93m" if USE_COLOR else ""
+    RED = "\033[91m" if USE_COLOR else ""
+    BLUE = "\033[94m" if USE_COLOR else ""
+    MAGENTA = "\033[95m" if USE_COLOR else ""
+    WHITE = "\033[97m" if USE_COLOR else ""
+    DIM = "\033[90m" if USE_COLOR else ""
+    BOLD = "\033[1m" if USE_COLOR else ""
+    RESET = "\033[0m" if USE_COLOR else ""
+
+    @classmethod
+    def badge(cls, fmt: str) -> str:
+        fmt_u = fmt.upper()
+        if fmt_u == "CBZ":
+            return f"{cls.CYAN}{cls.BOLD}[CBZ]{cls.RESET}"
+        elif fmt_u == "CBR":
+            return f"{cls.BLUE}{cls.BOLD}[CBR]{cls.RESET}"
+        elif fmt_u == "ZIP":
+            return f"{cls.YELLOW}{cls.BOLD}[ZIP]{cls.RESET}"
+        elif fmt_u == "PDF":
+            return f"{cls.MAGENTA}[PDF]{cls.RESET}"
+        return f"[{fmt_u}]"
+
+
 def get_terminal_key() -> str:
-    """Reads a single keypress from terminal across Windows, macOS, and Linux."""
+    """Reads a single keypress or escape sequence across Windows, macOS, Termux, and Linux."""
     if os.name == "nt":
         import msvcrt
         key = msvcrt.getwch()
         if key in ("\x00", "\xe0"):
             key2 = msvcrt.getwch()
-            if key2 == "H":
-                return "UP"
-            if key2 == "P":
-                return "DOWN"
+            mapping = {
+                "H": "UP",
+                "P": "DOWN",
+                "K": "LEFT",
+                "M": "RIGHT",
+                "I": "PGUP",
+                "Q": "PGDN",
+                "G": "HOME",
+                "O": "END",
+                "S": "DELETE"
+            }
+            return mapping.get(key2, "")
         if key == " ":
             return "SPACE"
         if key in ("\r", "\n"):
             return "ENTER"
         if key == "\x1b":
             return "ESC"
+        if key in ("\x08", "\x7f"):
+            return "BACKSPACE"
+        if key == "\x04":  # Ctrl+D
+            return "PGDN"
+        if key == "\x15":  # Ctrl+U
+            return "PGUP"
         return key.lower()
     else:
         import termios
@@ -763,6 +814,10 @@ def get_terminal_key() -> str:
             tty.setraw(fd)
             ch = sys.stdin.read(1)
             if ch == "\x1b":
+                import select
+                r, _, _ = select.select([sys.stdin], [], [], 0.05)
+                if not r:
+                    return "ESC"
                 ch2 = sys.stdin.read(1)
                 if ch2 == "[":
                     ch3 = sys.stdin.read(1)
@@ -770,11 +825,37 @@ def get_terminal_key() -> str:
                         return "UP"
                     if ch3 == "B":
                         return "DOWN"
+                    if ch3 == "C":
+                        return "RIGHT"
+                    if ch3 == "D":
+                        return "LEFT"
+                    if ch3 == "H":
+                        return "HOME"
+                    if ch3 == "F":
+                        return "END"
+                    if ch3 in ("5", "6"):
+                        sys.stdin.read(1)  # ~
+                        return "PGUP" if ch3 == "5" else "PGDN"
+                    if ch3 in ("1", "4"):
+                        sys.stdin.read(1)  # ~
+                        return "HOME" if ch3 == "1" else "END"
+                elif ch2 in ("O", "o"):
+                    ch3 = sys.stdin.read(1)
+                    if ch3 == "H":
+                        return "HOME"
+                    if ch3 == "F":
+                        return "END"
                 return "ESC"
             if ch == " ":
                 return "SPACE"
             if ch in ("\r", "\n"):
                 return "ENTER"
+            if ch in ("\x7f", "\x08"):
+                return "BACKSPACE"
+            if ch == "\x04":  # Ctrl+D
+                return "PGDN"
+            if ch == "\x15":  # Ctrl+U
+                return "PGUP"
             return ch.lower()
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
@@ -785,109 +866,460 @@ def clear_screen():
     os.system("cls" if os.name == "nt" else "clear")
 
 
+def show_item_detail_popup(item: Dict[str, Any], term_width: int = 80):
+    """Renders a structured details dossier popup for the selected comic item."""
+    clear_screen()
+    T = CLITheme
+    w = min(max(term_width - 4, 60), 86)
+    horiz = "═" * w
+    thin = "─" * w
+
+    print("\n" + f"  {T.CYAN}{T.BOLD}{horiz}{T.RESET}")
+    print(f"  {T.BOLD}📖 COMIC ISSUE DETAILS & CONTINUITY DOSSIER{T.RESET}")
+    print(f"  {T.CYAN}{horiz}{T.RESET}")
+
+    disp_title = item.get("display_title") or item.get("canonical_title") or item.get("filename", "")
+    print(f"  {T.BOLD}Title       :{T.RESET} {disp_title}")
+    if item.get("canonical_title") and item.get("canonical_title") != disp_title:
+        print(f"  {T.BOLD}Canonical   :{T.RESET} {T.YELLOW}★ {item['canonical_title']}{T.RESET}")
+    
+    author = item.get("author", "N/A")
+    if author and author != "N/A":
+        print(f"  {T.BOLD}Creator(s)  :{T.RESET} {author}")
+    
+    yr = item.get("year", 0)
+    iss = item.get("issue_num", 0)
+    yr_str = str(yr) if yr else "Unknown"
+    iss_str = f"#{int(iss)}" if iss else "TPB / One-Shot"
+    print(f"  {T.BOLD}Release Year:{T.RESET} {yr_str}   |   {T.BOLD}Issue:{T.RESET} {iss_str}")
+    
+    fmt = item.get("format", "UNKNOWN")
+    fmt_desc = "Primary (Preferred)" if fmt in ("CBZ", "CBR") else ("Comic Scan Archive" if fmt == "ZIP" else "Fallback Document")
+    print(f"  {T.BOLD}Format      :{T.RESET} {T.badge(fmt)} {T.DIM}({fmt_desc}){T.RESET}")
+    print(f"  {T.BOLD}File Size   :{T.RESET} {item.get('size_mb', 0.0):.2f} MB")
+    print(f"  {T.BOLD}File Name   :{T.RESET} {item.get('filename', '')}")
+    print(f"  {T.BOLD}Archive Id  :{T.RESET} {item.get('identifier', 'N/A')}")
+    print(f"  {T.BOLD}Source URL  :{T.RESET} {T.DIM}{item.get('download_url', '')}{T.RESET}")
+
+    synopsis = item.get("synopsis", "")
+    if synopsis:
+        print(f"  {T.CYAN}{thin}{T.RESET}")
+        print(f"  {T.BOLD}Plot & Continuity Synopsis:{T.RESET}")
+        words = synopsis.split()
+        curr_line = "  "
+        for word in words:
+            if len(curr_line) + len(word) + 1 > w:
+                print(curr_line)
+                curr_line = "  " + word
+            else:
+                curr_line += (" " if curr_line.strip() else "") + word
+        if curr_line.strip():
+            print(curr_line)
+
+    print(f"  {T.CYAN}{horiz}{T.RESET}")
+    print(f"  {T.GREEN}[ Press ANY KEY to return to selection list ]{T.RESET}")
+    get_terminal_key()
+
+
 def interactive_checkbox_selector(items: List[Dict[str, Any]], default_folder: str) -> List[Dict[str, Any]]:
     """
-    Renders an interactive TUI selector with checkboxes:
-      ↑/↓    : Move cursor
-      SPACE  : Tick / Untick
-      A      : Select All
-      N      : Select None
-      ENTER  : Confirm Selection
-      Q      : Cancel / Exit
+    Renders an interactive, responsive terminal UI selector with checkboxes:
+      [↑/↓ / j/k]    : Move cursor
+      [SPACE]        : Tick / Untick
+      [A]            : Select All (in current filter)
+      [N]            : Deselect All (in current filter)
+      [I]            : Invert Selection
+      [C]            : Select Canonical / Essential issues only
+      [F]            : Cycle Format Filter (ALL / CBZ / CBR / COMIC / PDF)
+      [/] or [S]     : Live Search Filter
+      [R] or [:]     : Enter Range / Index (e.g. 1-10, 15)
+      [?] or [V]     : Inspect Comic Details / Synopsis
+      [PGUP/PGDN]    : Scroll by Page
+      [HOME/END]     : Jump to Top / Bottom
+      [ENTER]        : Confirm & Approve Selection
+      [Q] / [ESC]    : Cancel / Exit
     """
     if not items:
         return []
 
-    # Default: select all
-    selected = [True] * len(items)
-    cursor = 0
-
-    # Fallback to plain prompt if not a real interactive terminal
     if not sys.stdin.isatty():
         return plain_text_selector(items)
 
-    while True:
-        clear_screen()
-        print("═" * 78)
-        print("  📚 SELECT COMICS TO DOWNLOAD (CHRONOLOGICAL ORDER)")
-        print("═" * 78)
-        print("  [↑ / ↓] Move Cursor   |  [SPACE] Toggle [x]/[ ]  |  [A] Select All")
-        print("  [N] Deselect None     |  [ENTER] Confirm (Yes)   |  [Q] Cancel")
-        print("─" * 78)
+    T = CLITheme
 
+    # Smart default selection
+    has_canonical = any(it.get("is_canonical") for it in items)
+    if len(items) <= 30 or not has_canonical:
+        selected = [True] * len(items)
+        status_message = None
+    else:
+        selected = [bool(it.get("is_canonical")) for it in items]
+        canonical_count = sum(selected)
+        status_message = f"[★] Pre-selected {canonical_count} canonical issues from {len(items)} found. Press [A] for all."
+
+    format_filters = [None, "CBZ", "CBR", "COMIC", "PDF"]
+    filter_labels = {
+        None: "ALL FORMATS",
+        "CBZ": "CBZ ONLY",
+        "CBR": "CBR ONLY",
+        "COMIC": "COMIC ARCHIVES (CBZ/CBR/ZIP)",
+        "PDF": "PDF ONLY"
+    }
+    filter_idx = 0
+    search_query = ""
+    cursor = 0
+    scroll_top = 0
+
+    def compute_visible() -> List[int]:
+        active_fmt = format_filters[filter_idx]
+        res = []
+        for idx, item in enumerate(items):
+            if active_fmt:
+                if active_fmt == "COMIC" and item["format"] not in ("CBZ", "CBR", "ZIP"):
+                    continue
+                elif active_fmt != "COMIC" and item["format"] != active_fmt:
+                    continue
+            if search_query:
+                sq = search_query.lower()
+                haystack = f"{item['filename']} {item.get('display_title', '')} {item.get('author', '')} {item.get('year', '')} {item.get('synopsis', '')}".lower()
+                if sq not in haystack:
+                    continue
+            res.append(idx)
+        return res
+
+    while True:
+        visible = compute_visible()
+        if not visible and (format_filters[filter_idx] or search_query):
+            cursor = 0
+            scroll_top = 0
+        else:
+            cursor = max(0, min(cursor, len(visible) - 1)) if visible else 0
+
+        term_width, term_height = shutil.get_terminal_size((80, 24))
+        term_width = max(70, min(term_width, 110))
+        max_rows = max(6, min(term_height - 11, 26))
+
+        # Adjust scroll window
+        if visible:
+            if cursor < scroll_top:
+                scroll_top = cursor
+            elif cursor >= scroll_top + max_rows:
+                scroll_top = cursor - max_rows + 1
+            scroll_top = max(0, min(scroll_top, max(0, len(visible) - max_rows)))
+
+        clear_screen()
+        horiz = "═" * (term_width - 2)
+        thin = "─" * (term_width - 2)
+
+        # Header Box
+        print(f"╔{horiz}╗")
+        title_line = f" 📚 SELECT COMICS TO DOWNLOAD — {default_folder}"
+        pad_t = max(0, (term_width - 2) - len(title_line))
+        print(f"║{T.BOLD}{title_line}{' ' * pad_t}{T.RESET}║")
+        print(f"╠{thin}╣")
+        
+        # Navigation bar
+        k1 = " [↑/↓/j/k] Move  [SPACE] Toggle  [A] All  [N] None  [I] Invert  [C] Canonical"
+        pad_k1 = max(0, (term_width - 2) - len(k1))
+        print(f"║{T.DIM}{k1}{' ' * pad_k1}{T.RESET}║")
+
+        k2 = " [F] Format Filter   [/] Search   [R] Range   [?] Details   [ENTER] Confirm"
+        pad_k2 = max(0, (term_width - 2) - len(k2))
+        print(f"║{T.DIM}{k2}{' ' * pad_k2}{T.RESET}║")
+        print(f"╚{horiz}╝")
+
+        # Stats bar
         total_selected = sum(selected)
         total_size_mb = sum(items[i]["size_mb"] for i in range(len(items)) if selected[i])
-        print(f"  Selected: {total_selected} of {len(items)} comics | Total Size: {total_size_mb:.1f} MB")
-        print("─" * 78)
+        filter_name = filter_labels[format_filters[filter_idx]]
+        search_tag = f"  |  Search: '{search_query}'" if search_query else ""
+        
+        size_str = f"{total_size_mb / 1024:.2f} GB" if total_size_mb >= 1024 else f"{total_size_mb:.1f} MB"
+        cur_pos_str = f"Item {cursor + 1} of {len(visible)}" if visible else "No Items"
+        
+        print(f"  {T.BOLD}Selected:{T.RESET} {T.GREEN}{total_selected}{T.RESET}/{len(items)} issues ({T.CYAN}{size_str}{T.RESET})  |  {T.BOLD}Filter:{T.RESET} [{T.MAGENTA}{filter_name}{T.RESET}]{search_tag}  |  {cur_pos_str}")
+        if status_message:
+            print(f"  {T.YELLOW}{status_message}{T.RESET}")
+            status_message = None
+        else:
+            print(f"  {thin}")
 
-        # Show visible window of items if list is long
-        max_rows = 15
-        start_idx = max(0, min(cursor - max_rows // 2, len(items) - max_rows))
-        end_idx = min(len(items), start_idx + max_rows)
+        # Empty state handling
+        if not visible:
+            print(f"\n      {T.YELLOW}[!] No issues match the active filter.{T.RESET}")
+            print(f"      Press {T.BOLD}[F]{T.RESET} to change format filter, or {T.BOLD}[/]{T.RESET} to clear search.\n")
+            for _ in range(max_rows - 3):
+                print()
+        else:
+            end_row = min(len(visible), scroll_top + max_rows)
+            for v_idx in range(scroll_top, end_row):
+                real_idx = visible[v_idx]
+                item = items[real_idx]
+                is_cur = (v_idx == cursor)
 
-        if start_idx > 0:
-            print(f"  ... ({start_idx} earlier items above) ...")
+                pointer = f"{T.CYAN}{T.BOLD}▶{T.RESET}" if is_cur else " "
+                chk_sym = f"{T.GREEN}{T.BOLD}[✔]{T.RESET}" if selected[real_idx] else f"{T.DIM}[ ]{T.RESET}"
+                star_sym = f"{T.YELLOW}★{T.RESET}" if item.get("is_canonical") else " "
+                badge = T.badge(item["format"])
+                num_tag = f"{real_idx + 1:3d}."
+                
+                yr_val = item.get("year", 0)
+                yr_str = f"{T.DIM}({yr_val}){T.RESET} " if yr_val else "      "
 
-        for i in range(start_idx, end_idx):
-            item = items[i]
-            pointer = "▶" if i == cursor else " "
-            checkbox = "[x]" if selected[i] else "[ ]"
-            year_str = f"[{item['year']}] " if item["year"] else ""
-            num_str = f"#{int(item['issue_num']):02d} " if item["issue_num"] else ""
-            size_fmt = f"[{item['format']} | {item['size_mb']:5.1f} MB]"
-            
-            line = f"  {pointer} {checkbox} {i+1:2d}. {year_str}{num_str}{item['filename'][:40]} {size_fmt}"
-            print(line)
+                iss_val = item.get("issue_num", 0)
+                iss_str = f"#{int(iss_val):02d} " if iss_val else "    "
 
-        if end_idx < len(items):
-            print(f"  ... ({len(items) - end_idx} more items below) ...")
+                sz_str = f"{item['size_mb']:5.1f} MB"
 
-        print("═" * 78)
-        print("  Press ENTER when done to approve and proceed with download.")
+                fixed_len = 1 + 3 + 1 + 4 + 7 + 5 + 6 + 10 + 2
+                max_name_len = max(20, term_width - fixed_len)
+                
+                raw_name = item.get("display_title") or item["filename"]
+                if len(raw_name) > max_name_len:
+                    clean_name = raw_name[:max_name_len - 3] + "..."
+                else:
+                    clean_name = raw_name.ljust(max_name_len)
 
+                if is_cur:
+                    row_str = f"  {pointer} {chk_sym} {star_sym} {T.BOLD}{num_tag}{T.RESET} {badge} {yr_str}{iss_str}{T.BOLD}{clean_name}{T.RESET} {T.CYAN}{sz_str}{T.RESET}"
+                else:
+                    row_str = f"  {pointer} {chk_sym} {star_sym} {num_tag} {badge} {yr_str}{iss_str}{clean_name} {T.DIM}{sz_str}{T.RESET}"
+                
+                print(row_str)
+
+            for _ in range(max_rows - (end_row - scroll_top)):
+                print()
+
+        # Footer Progress Bar & Scroll indicator
+        print(f"  {thin}")
+        if visible and len(visible) > max_rows:
+            pct = int((end_row / len(visible)) * 20)
+            bar = "█" * pct + "░" * (20 - pct)
+            print(f"  Viewing {scroll_top + 1}-{end_row} of {len(visible)}  [{T.CYAN}{bar}{T.RESET}]  |  [ENTER] Confirm selection")
+        else:
+            print(f"  Viewing {len(visible)} of {len(visible)} issues  |  [ENTER] Confirm selection")
+
+        # Read key
         key = get_terminal_key()
 
-        if key == "UP":
-            cursor = (cursor - 1) % len(items)
-        elif key == "DOWN":
-            cursor = (cursor + 1) % len(items)
+        # Navigation
+        if key in ("UP", "k"):
+            if visible:
+                cursor = (cursor - 1) % len(visible)
+        elif key in ("DOWN", "j"):
+            if visible:
+                cursor = (cursor + 1) % len(visible)
+        elif key in ("PGUP", "["):
+            if visible:
+                cursor = max(0, cursor - max_rows)
+        elif key in ("PGDN", "]"):
+            if visible:
+                cursor = min(len(visible) - 1, cursor + max_rows)
+        elif key in ("HOME", "g"):
+            cursor = 0
+        elif key in ("END", "G"):
+            if visible:
+                cursor = len(visible) - 1
+
+        # Toggle item
         elif key == "SPACE":
-            selected[cursor] = not selected[cursor]
+            if visible:
+                r_idx = visible[cursor]
+                selected[r_idx] = not selected[r_idx]
+
+        # Select all visible
         elif key == "a":
-            selected = [True] * len(items)
+            if visible:
+                for idx in visible:
+                    selected[idx] = True
+                status_message = f"[✓] Selected all {len(visible)} item(s) in current view."
+
+        # Deselect all visible
         elif key == "n":
-            selected = [False] * len(items)
+            if visible:
+                for idx in visible:
+                    selected[idx] = False
+                status_message = f"[✓] Deselected all {len(visible)} item(s) in current view."
+
+        # Invert selection
+        elif key == "i":
+            if visible:
+                for idx in visible:
+                    selected[idx] = not selected[idx]
+                status_message = "[✓] Inverted selection."
+
+        # Select canonical only
+        elif key == "c":
+            for idx, it in enumerate(items):
+                selected[idx] = bool(it.get("is_canonical"))
+            c_count = sum(selected)
+            status_message = f"[★] Selected {c_count} canonical reading order issue(s)!"
+
+        # Cycle format filter
+        elif key == "f":
+            filter_idx = (filter_idx + 1) % len(format_filters)
+            cursor = 0
+            scroll_top = 0
+            status_message = f"[Filter] Switched to {filter_labels[format_filters[filter_idx]]}"
+
+        # Live search filter
+        elif key in ("/", "s"):
+            clear_screen()
+            print("\n" + f"  {T.CYAN}{'═' * 60}{T.RESET}")
+            print(f"  {T.BOLD}🔍 SEARCH / KEYWORD FILTER{T.RESET}")
+            print(f"  {T.DIM}Type keyword to filter list (leave empty to reset filter){T.RESET}")
+            print(f"  {T.CYAN}{'═' * 60}{T.RESET}\n")
+            try:
+                sq_input = input("  Search term: ").strip()
+                search_query = sq_input
+                cursor = 0
+                scroll_top = 0
+                if search_query:
+                    status_message = f"[Search] Filtered by '{search_query}'"
+                else:
+                    status_message = "[Search] Filter cleared."
+            except (EOFError, KeyboardInterrupt):
+                pass
+
+        # Range / numeric input
+        elif key in ("r", ":"):
+            clear_screen()
+            print("\n" + f"  {T.CYAN}{'═' * 60}{T.RESET}")
+            print(f"  {T.BOLD}🔢 SELECT BY RANGE OR SHORTCUT{T.RESET}")
+            print(f"  {T.DIM}Examples: '1-10', '1, 3, 5-8', 'cbz', 'canonical', 'all', 'none'{T.RESET}")
+            print(f"  {T.CYAN}{'═' * 60}{T.RESET}\n")
+            try:
+                cmd = input("  Enter selection: ").strip().lower()
+                if cmd in ("all", "a"):
+                    for idx in visible:
+                        selected[idx] = True
+                    status_message = "[✓] Selected all."
+                elif cmd in ("none", "n"):
+                    for idx in visible:
+                        selected[idx] = False
+                    status_message = "[✓] Deselected all."
+                elif cmd in ("canonical", "c"):
+                    for idx, it in enumerate(items):
+                        selected[idx] = bool(it.get("is_canonical"))
+                    status_message = "[✓] Selected canonical only."
+                elif cmd in ("cbz", "cbr", "pdf", "zip"):
+                    for idx, it in enumerate(items):
+                        if it["format"].lower() == cmd:
+                            selected[idx] = True
+                    status_message = f"[✓] Selected all {cmd.upper()} files."
+                elif cmd:
+                    applied = 0
+                    parts = cmd.split(",")
+                    for p in parts:
+                        p = p.strip()
+                        if "-" in p:
+                            sub = p.split("-", 1)
+                            try:
+                                s, e = int(sub[0]), int(sub[1])
+                                for x in range(s, e + 1):
+                                    if 1 <= x <= len(items):
+                                        selected[x - 1] = True
+                                        applied += 1
+                            except ValueError:
+                                pass
+                        else:
+                            try:
+                                val = int(p)
+                                if 1 <= val <= len(items):
+                                    selected[val - 1] = True
+                                    applied += 1
+                            except ValueError:
+                                pass
+                    status_message = f"[✓] Applied range to {applied} item(s)."
+            except (EOFError, KeyboardInterrupt):
+                pass
+
+        # Detail inspect popup
+        elif key in ("?", "v"):
+            if visible:
+                target_item = items[visible[cursor]]
+                show_item_detail_popup(target_item, term_width)
+
+        # Cancel / Quit
         elif key in ("q", "esc"):
-            print("\n[-] Selection cancelled by user.")
+            if search_query or format_filters[filter_idx] is not None:
+                search_query = ""
+                filter_idx = 0
+                cursor = 0
+                scroll_top = 0
+                status_message = "[✓] Reset all filters to default."
+                continue
+            clear_screen()
+            print("\n[-] Selection cancelled by user.\n")
             return []
+
+        # Confirm Selection
         elif key == "ENTER":
             if not any(selected):
-                print("\n  [!] No comics selected. Press SPACE on an item to select it, or A for all.")
-                time.sleep(1.2)
+                status_message = "[!] No comics selected. Press SPACE on an item, or [A] for all, [C] for canonical."
                 continue
             return [items[i] for i in range(len(items)) if selected[i]]
 
 
 def plain_text_selector(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Fallback selector for environments without raw tty capability."""
+    """
+    Enhanced fallback selector for headless, scripted, or non-TTY environments.
+    Supports rich range syntax, presets ('canonical', 'cbz', 'all'), and format filtering.
+    """
+    T = CLITheme
     print("\n" + "═" * 78)
     print("  📚 AVAILABLE COMICS (CHRONOLOGICAL ORDER)")
     print("═" * 78)
-    for idx, item in enumerate(items, 1):
-        year_str = f"[{item['year']}] " if item["year"] else ""
-        num_str = f"#{int(item['issue_num']):02d} " if item["issue_num"] else ""
-        print(f"  {idx:2d}. {year_str}{num_str}{item['filename']} [{item['format']} | {item['size_mb']} MB]")
+
+    counts: Dict[str, int] = {}
+    for it in items:
+        counts[it["format"]] = counts.get(it["format"], 0) + 1
+    counts_str = ", ".join(f"{v} {k}" for k, v in sorted(counts.items()))
+    print(f"  Discovered: {len(items)} issues ({counts_str})")
+    print("─" * 78)
+
+    limit = 60
+    for idx, item in enumerate(items[:limit], 1):
+        star = "★ " if item.get("is_canonical") else "  "
+        yr_str = f"({item['year']}) " if item.get("year") else "      "
+        num_str = f"#{int(item['issue_num']):02d} " if item.get("issue_num") else "    "
+        badge = f"[{item['format']}]"
+        raw_name = item.get("display_title") or item["filename"]
+        truncated = raw_name[:42] + ("..." if len(raw_name) > 42 else "")
+        print(f"  {idx:3d}. {star}{badge:5s} {yr_str}{num_str}{truncated:<45s} {item['size_mb']:5.1f} MB")
+
+    if len(items) > limit:
+        print(f"  ... ({len(items) - limit} more issues discovered) ...")
+
     print("═" * 78)
-    print("  Enter item numbers to download (e.g. '1, 2, 4-6' or 'all'): ")
+    print("  Selection Options:")
+    print("    - Numbers / Ranges : '1, 2, 4-6, 12'")
+    print("    - Canonical preset : 'canonical' or 'c' (selects AI-recommended issues)")
+    print("    - Format preset    : 'cbz', 'cbr', or 'pdf'")
+    print("    - All / None       : 'all' (default) or 'none'")
+    print("─" * 78)
+
     try:
-        choice = input("  Selection: ").strip().lower()
+        choice = input("  Enter selection: ").strip().lower()
     except (EOFError, KeyboardInterrupt):
         return []
 
-    if choice in ("", "all"):
+    if choice in ("", "all", "a"):
         return items
-    if choice in ("none", "q", "quit"):
+    if choice in ("none", "q", "quit", "exit"):
         return []
+
+    if choice in ("canonical", "c"):
+        canonical_items = [it for it in items if it.get("is_canonical")]
+        return canonical_items if canonical_items else items
+
+    if choice in ("cbz", "cbr", "pdf", "zip"):
+        matching = [it for it in items if it["format"].lower() == choice]
+        return matching if matching else items
+
+    if choice.startswith("find ") or choice.startswith("search "):
+        term = choice.split(" ", 1)[1].strip()
+        return [it for it in items if term in f"{it['filename']} {it.get('display_title', '')}".lower()]
 
     selected_indices = set()
     parts = choice.split(",")
@@ -915,38 +1347,63 @@ def plain_text_selector(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 def confirm_approval_gate(selected_files: List[Dict[str, Any]], folder_name: str) -> bool:
     """
-    Final approval gate: Displays selected list, destination directory,
-    and asks user to confirm ('Click Yes' / [y/n]).
+    Final approval confirmation gate:
+    Displays an elegant confirmation card with format breakdown, destination folder,
+    total download size, and requires user approval ('Click Yes' / [y/n]).
     """
     clear_screen()
-    print("\n" + "═" * 78)
-    print("  ✅ DOWNLOAD CONFIRMATION & APPROVAL GATE")
-    print("═" * 78)
-    target_path = DOWNLOADS_ROOT / folder_name
+    T = CLITheme
     total_mb = sum(f["size_mb"] for f in selected_files)
+    size_str = f"{total_mb / 1024:.2f} GB" if total_mb >= 1024 else f"{total_mb:.1f} MB"
+    target_path = DOWNLOADS_ROOT / folder_name
 
-    print(f"  Target Run Folder : {target_path}")
-    print(f"  Comics Selected   : {len(selected_files)} issue(s)")
-    print(f"  Total Download    : {total_mb:.1f} MB")
-    print("─" * 78)
-    print("  Selected Issues to Download:")
-    for i, f in enumerate(selected_files[:10], 1):
-        year_tag = f"({f['year']}) " if f["year"] else ""
-        print(f"    {i:2d}. {year_tag}{f['filename']} ({f['size_mb']} MB)")
-    if len(selected_files) > 10:
-        print(f"    ... and {len(selected_files) - 10} more issue(s)")
-    print("═" * 78)
+    format_breakdown: Dict[str, Dict[str, Any]] = {}
+    for f in selected_files:
+        fmt = f["format"]
+        if fmt not in format_breakdown:
+            format_breakdown[fmt] = {"count": 0, "size": 0.0}
+        format_breakdown[fmt]["count"] += 1
+        format_breakdown[fmt]["size"] += f["size_mb"]
 
-    prompt = "  Ready to create folder and download all selected comics? [Y/n] (Click Yes): "
+    breakdown_parts = []
+    for fmt, d in sorted(format_breakdown.items()):
+        breakdown_parts.append(f"{T.badge(fmt)} {d['count']} issue(s) ({d['size']:.1f} MB)")
+    breakdown_str = "  |  ".join(breakdown_parts)
+
+    print("\n" + f"  {T.CYAN}{T.BOLD}╔{'═' * 74}╗{T.RESET}")
+    print(f"  {T.CYAN}{T.BOLD}║  ✅ DOWNLOAD CONFIRMATION & APPROVAL GATE{' ' * 31}║{T.RESET}")
+    print(f"  {T.CYAN}{T.BOLD}╠{'═' * 74}╣{T.RESET}")
+    print(f"  ║  {T.BOLD}Destination Folder :{T.RESET} {T.CYAN}{target_path}{T.RESET}")
+    print(f"  ║  {T.BOLD}Comics Selected    :{T.RESET} {T.GREEN}{len(selected_files)}{T.RESET} issue(s) ({T.YELLOW}{size_str}{T.RESET})")
+    print(f"  ║  {T.BOLD}Format Breakdown   :{T.RESET} {breakdown_str}")
+    print(f"  {T.CYAN}{T.BOLD}╠{'─' * 74}╣{T.RESET}")
+    print(f"  ║  {T.BOLD}Selected Issues Preview:{T.RESET}")
+
+    preview_limit = 12
+    for i, f in enumerate(selected_files[:preview_limit], 1):
+        star = f"{T.YELLOW}★{T.RESET} " if f.get("is_canonical") else "  "
+        yr_str = f"({f['year']}) " if f.get("year") else ""
+        badge = T.badge(f["format"])
+        raw_name = f.get("display_title") or f["filename"]
+        truncated = raw_name[:48] + ("..." if len(raw_name) > 48 else "")
+        print(f"  ║   {i:2d}. {star}{badge} {yr_str}{truncated:<50s} ({f['size_mb']:5.1f} MB)")
+
+    if len(selected_files) > preview_limit:
+        remaining = len(selected_files) - preview_limit
+        print(f"  ║   {T.DIM}... and {remaining} more issue(s) ...{T.RESET}")
+
+    print(f"  {T.CYAN}{T.BOLD}╚{'═' * 74}╝{T.RESET}\n")
+
+    prompt = f"  {T.BOLD}Ready to create folder and download {len(selected_files)} comic(s)? [Y/n] (Press ENTER or Y to start): {T.RESET}"
     try:
         decision = input(prompt).strip().lower()
         if decision in ("", "y", "yes", "true", "1"):
             return True
         else:
-            print("\n[-] Download cancelled by user.")
+            print(f"\n{T.YELLOW}[-] Download cancelled by user.{T.RESET}\n")
             return False
     except (EOFError, KeyboardInterrupt):
-        print("\n[-] Cancelled.")
+        print("\n[-] Cancelled.\n")
         return False
 
 

@@ -27,10 +27,24 @@ Following the hardened architecture in `antigravity_server/Instruction`:
    - Comic scan `.zip` files are automatically handled as `.cbz`.
 3. **Chronological Issue Display**:
    Automatically orders all available issues chronologically by publication year and issue number.
-4. **Interactive Checkbox Selector**:
-   A terminal UI (TUI) selector allowing you to navigate with arrow keys (`↑`/`↓`), toggle selection with `SPACE`, select all (`A`), deselect all (`N`), or select by comma-separated numbers / ranges (e.g. `1-4, 6`).
+4. **Enhanced Interactive TUI Selector**:
+   A rich, responsive terminal UI (TUI) with real-time viewport scrolling, ANSI badge styling, and shortcuts:
+   - `[↑ / ↓ / j / k]` : Move cursor row-by-row
+   - `[SPACE]` : Toggle selection checkmark `[✔]` / `[ ]`
+   - `[A]` : Select All (in current view/filter)
+   - `[N]` : Deselect All (in current view/filter)
+   - `[I]` : Invert selection
+   - `[C]` : Select Canonical only (instantly selects essential AI reading order issues `★`)
+   - `[F]` : Cycle format filter (`ALL` ➔ `CBZ ONLY` ➔ `CBR ONLY` ➔ `COMIC (CBZ/CBR/ZIP)` ➔ `PDF ONLY`)
+   - `[/]` or `[S]` : Live search / keyword filter (e.g. filter by `hickman` or `01` in real-time)
+   - `[R]` or `[:]` : Select by range or preset (`1-10, 15`, `cbz`, `canonical`)
+   - `[?]` or `[V]` : Inspect comic issue details & plot synopsis popup card
+   - `[PGUP / PGDN]` : Scroll by page
+   - `[HOME / END]` : Jump to top / bottom
+   - `[ENTER]` : Confirm selection and proceed to approval gate
+   - `[Q / ESC]` : Cancel selection or clear active search filter
 5. **Approval Confirmation Gate ("Click Yes")**:
-   Before downloading, displays a review card of selected issues, total size in MB, and destination folder. Downloads proceed only after you confirm (`[Y/n]` / Yes).
+   Before downloading, displays a review card of selected issues, breakdown of file formats, total size in MB/GB, and destination folder. Downloads proceed only after you confirm (`[Y/n]` / Yes).
 6. **Dedicated Folder Organization**:
    Automatically creates a cleanly named folder (e.g. `downloads/X Men Krakoa Era (2019)`) and streams downloads with active progress bars.
 

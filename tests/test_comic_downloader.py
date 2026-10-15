@@ -12,8 +12,10 @@ Tests:
   7. Format Priority (CBZ > CBR > ZIP > PDF)
   8. Safe Keyless Virtual Middleware URL Resolution (Zero Client Keys)
   9. Live Antigravity Virtual Middleware Chronology Query
+ 10. Enhanced CLI Selection, Presets & Badge Styling
 """
 import sys
+from io import StringIO
 from pathlib import Path
 
 # Ensure UTF-8 output
@@ -33,6 +35,7 @@ from comic_downloader import (
     plain_text_selector,
     resolve_virtual_middleware_url,
     call_virtual_middleware_ai,
+    CLITheme,
     DEFAULT_PUB_SLUG,
     DEFAULT_GATEWAY_URL
 )
@@ -173,6 +176,50 @@ def test_live_virtual_middleware_query():
     else:
         print("  [!] Antigravity Server is running in background or offline. Skipped live test.")
 
+def test_cli_selection_features():
+    print("\n=== Test 10: CLI Selection, Presets & Badge Styling ===")
+    # Test badges
+    assert "CBZ" in CLITheme.badge("CBZ")
+    assert "CBR" in CLITheme.badge("CBR")
+    assert "PDF" in CLITheme.badge("PDF")
+    print("  [✓] Format badge styling verified.")
+
+    mock_items = [
+        {"filename": "issue_1.cbz", "display_title": "House of X #1", "format": "CBZ", "size_mb": 15.0, "year": 2019, "issue_num": 1, "is_canonical": True},
+        {"filename": "issue_2.cbz", "display_title": "House of X #2", "format": "CBZ", "size_mb": 14.0, "year": 2019, "issue_num": 2, "is_canonical": True},
+        {"filename": "extra_scans.cbr", "display_title": "Fan Scans", "format": "CBR", "size_mb": 20.0, "year": 2019, "issue_num": 0, "is_canonical": False},
+        {"filename": "guide.pdf", "display_title": "Reading Guide", "format": "PDF", "size_mb": 5.0, "year": 2020, "issue_num": 0, "is_canonical": False},
+    ]
+
+    # Test plain_text_selector with 'canonical' preset
+    saved_stdin = sys.stdin
+    try:
+        sys.stdin = StringIO("canonical\n")
+        sel_canonical = plain_text_selector(mock_items)
+        assert len(sel_canonical) == 2
+        assert all(it["is_canonical"] for it in sel_canonical)
+        print("  [✓] Preset 'canonical' correctly selects only AI-recommended issues.")
+
+        # Test plain_text_selector with format 'cbz'
+        sys.stdin = StringIO("cbz\n")
+        sel_cbz = plain_text_selector(mock_items)
+        assert len(sel_cbz) == 2 and all(it["format"] == "CBZ" for it in sel_cbz)
+        print("  [✓] Preset 'cbz' correctly filters by format.")
+
+        # Test plain_text_selector with range '1-2'
+        sys.stdin = StringIO("1-2\n")
+        sel_range = plain_text_selector(mock_items)
+        assert len(sel_range) == 2 and sel_range[0]["filename"] == "issue_1.cbz"
+        print("  [✓] Range selection '1-2' verified.")
+
+        # Test search filter
+        sys.stdin = StringIO("find fan\n")
+        sel_search = plain_text_selector(mock_items)
+        assert len(sel_search) == 1 and "Fan Scans" in sel_search[0]["display_title"]
+        print("  [✓] Search keyword selection 'find fan' verified.")
+    finally:
+        sys.stdin = saved_stdin
+
 if __name__ == "__main__":
     print("=" * 60)
     print("RUNNING UNIT TESTS FOR COMIC CHRONOLOGY DOWNLOADER")
@@ -186,6 +233,7 @@ if __name__ == "__main__":
     test_format_priority()
     test_virtual_middleware_resolution()
     test_live_virtual_middleware_query()
+    test_cli_selection_features()
     print("\n" + "=" * 60)
     print(">>> ALL TESTS PASSED SUCCESSFULLY! <<<")
     print("=" * 60)
