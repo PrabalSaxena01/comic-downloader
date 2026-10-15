@@ -158,29 +158,30 @@ def call_gateway_ai(
         "Content-Type": "application/json"
     }
 
-    system_prompt = (
-        "You are an expert comic book historian and archivist.\n"
-        "Analyze the user's comic request and provide a chronological breakdown of issues/runs.\n"
-        "Return ONLY a valid JSON array of objects, with NO surrounding explanation or markdown except ```json ... ```:\n"
+    user_prompt = (
+        f"You are an expert comic book archivist and historian. For the comic run, character, or storyline '{prompt}', "
+        "provide a canonical chronological reading order breakdown of the essential comic issues or runs.\n"
+        "Return ONLY a valid JSON array of objects in this exact format:\n"
         "[\n"
         "  {\n"
-        '    "title": "Exact Title of Issue or Story Arc",\n'
-        '    "year": 1987,\n'
+        '    "title": "Exact Title of Run or Issue (e.g. House of X)",\n'
+        '    "year": 2019,\n'
         '    "issue_num": 1,\n'
-        '    "author": "Frank Miller (Writer) & David Mazzucchelli (Artist)",\n'
-        '    "synopsis": "Plot summary and continuity significance.",\n'
-        '    "search_query": "specific archive search query keywords"\n'
+        '    "author": "Creative Team (Writer and Artist)",\n'
+        '    "synopsis": "Concise 1-2 sentence plot and continuity summary",\n'
+        '    "search_query": "Clean archive search keywords (e.g. House of X)"\n'
         "  }\n"
         "]\n"
+        "Output ONLY the JSON array without any markdown conversational text."
     )
 
     payload = {
         "model": active_model,
         "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Query: {prompt}"}
+            {"role": "user", "content": user_prompt}
         ],
-        "temperature": 0.2
+        "temperature": 0.2,
+        "effort": "low"
     }
 
     try:
@@ -227,7 +228,7 @@ def call_agy_cli_advisor(prompt: str) -> Optional[List[Dict[str, Any]]]:
 
 
 def parse_ai_json_targets(content: str) -> List[Dict[str, Any]]:
-    """Extracts JSON list of targets from text content."""
+    """Extracts JSON or markdown reading order list of targets from text content."""
     json_match = re.search(r'\[\s*\{.*?\}\s*\]', content, re.DOTALL)
     if json_match:
         try:
@@ -246,6 +247,35 @@ def parse_ai_json_targets(content: str) -> List[Dict[str, Any]]:
                 return clean_items
         except Exception:
             pass
+
+    # Markdown list fallback (e.g. 1. **House of X / Powers of X** (2019))
+    md_matches = re.findall(r'^\s*(\d+)\.\s+\*\*([^*]+)\*\*(.*)', content, re.MULTILINE)
+    if not md_matches:
+        md_matches = re.findall(r'^\s*(\d+)\.\s+([^\n\r]+)', content, re.MULTILINE)
+
+    if md_matches:
+        clean_items = []
+        for match in md_matches[:12]:
+            num_str = match[0]
+            raw_title = match[1].strip()
+            extra = match[2] if len(match) > 2 else ""
+            clean_title = re.sub(r'[\(\[\{].*?[\)\]\}]', '', raw_title).strip().strip(':').strip()
+            if any(bad in clean_title.lower() for bad in ["prologue", "foundation", "overview", "introduction", "timeline", "recommendation", "note"]):
+                continue
+            if not clean_title or len(clean_title) < 3:
+                continue
+            yr = extract_year_from_text(extra) or extract_year_from_text(raw_title) or 0
+            clean_items.append({
+                "title": clean_title,
+                "year": yr,
+                "issue_num": int(num_str) if num_str.isdigit() else 0,
+                "author": "N/A",
+                "synopsis": extra.strip()[:150],
+                "search_query": clean_title
+            })
+        if clean_items:
+            return clean_items
+
     return []
 
 
@@ -346,14 +376,14 @@ def extract_year_from_text(text: str) -> Optional[int]:
 def search_archive_org(query: str, max_results: int = 5) -> List[Dict[str, Any]]:
     """Searches open comic archives on Archive.org."""
     clean_q = re.sub(r'Vol\.\s*\d+', '', query, flags=re.IGNORECASE)
-    clean_q = re.sub(r'[#:\(\)]', ' ', clean_q).strip()
+    clean_q = re.sub(r'[#:\(\)\/]', ' ', clean_q).strip()
     words = clean_q.split()[:5]
     search_term = " ".join(words)
     encoded = urllib.parse.quote(search_term)
 
     url = (
         f"https://archive.org/advancedsearch.php?"
-        f"q=mediatype:texts+AND+title:({encoded})"
+        f"q=mediatype:texts+AND+title:({encoded})+AND+(format:cbz+OR+format:cbr+OR+subject:comic+OR+subject:comics+OR+collection:comicbooksamy+OR+collection:comics_inbox+OR+description:comic)"
         f"&fl[]=identifier,title,downloads,year,description"
         f"&sort[]=downloads+desc&rows={max_results}&output=json"
     )
@@ -362,8 +392,25 @@ def search_archive_org(query: str, max_results: int = 5) -> List[Dict[str, Any]]
     try:
         with urllib.request.urlopen(req, timeout=12) as res:
             data = json.loads(res.read().decode())
+            docs = data.get("response", {}).get("docs", [])
+            if docs:
+                return docs
+    except Exception:
+        pass
+
+    # Fallback to general title search
+    url_fallback = (
+        f"https://archive.org/advancedsearch.php?"
+        f"q=mediatype:texts+AND+title:({encoded})"
+        f"&fl[]=identifier,title,downloads,year,description"
+        f"&sort[]=downloads+desc&rows={max_results}&output=json"
+    )
+    req = urllib.request.Request(url_fallback, headers={"User-Agent": "AntigravityComicChronology/3.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=12) as res:
+            data = json.loads(res.read().decode())
             return data.get("response", {}).get("docs", [])
-    except Exception as e:
+    except Exception:
         return []
 
 
@@ -383,7 +430,7 @@ def get_archive_files_for_item(identifier: str) -> List[Dict[str, Any]]:
                 ext = name.lower().split(".")[-1] if "." in name else ""
                 if ext in ["cbz", "cbr", "pdf", "zip"]:
                     # Filter out non-comic archives or auxiliary derivative files
-                    if any(bad in name.lower() for bad in ["_daisy", "_thumb", "_jp2.zip", "meta.xml", "files.xml"]):
+                    if any(bad in name.lower() for bad in ["_daisy", "_thumb", "_jp2.zip", "_text.pdf", "meta.xml", "files.xml"]):
                         continue
                     size_bytes = int(f.get("size", 0) or 0)
                     size_mb = round(size_bytes / (1024 * 1024), 2)
@@ -416,15 +463,19 @@ def discover_available_comics(
     discovered_identifiers = set()
     best_by_group = {}
 
-    # Collect search terms: overall query first, then AI targets
+    # Collect search terms: overall query first, then clean AI target titles
     search_queries = [query]
     for target in ai_targets:
-        sq = target.get("search_query")
-        if sq and sq.lower() != query.lower() and sq not in search_queries:
-            search_queries.append(sq)
+        title = target.get("title", "")
+        # Remove volume numbers, issue numbers, parentheses, subtitles after colon
+        clean_title = re.sub(r'Vol\.\s*\d+|#\d+|\(.*?\)|:\s*.*', '', title).strip()
+        parts = [p.strip() for p in clean_title.split("/") if p.strip()]
+        for p in parts:
+            if len(p) >= 3 and p.lower() != query.lower() and p not in search_queries:
+                search_queries.append(p)
 
-    for s_idx, q in enumerate(search_queries[:6], 1):
-        print(f"    [{s_idx}/{min(len(search_queries), 6)}] Searching: '{q}'...")
+    for s_idx, q in enumerate(search_queries[:10], 1):
+        print(f"    [{s_idx}/{min(len(search_queries), 10)}] Searching: '{q}'...")
         docs = search_archive_org(q, max_results=4)
         for doc in docs:
             ident = doc.get("identifier")
@@ -852,14 +903,10 @@ def run_comic_downloader(
 
     # 1. Resolve User Query
     if not query:
-        if sys.stdin.isatty():
-            try:
-                query = input("\n  Enter comic name, comic run, or storyline: ").strip()
-            except (EOFError, KeyboardInterrupt):
-                print("\n[-] Exiting.")
-                return
-        else:
-            print("[-] No query provided. Pass comic query as argument.")
+        try:
+            query = input("\n  Enter comic name, comic run, or storyline: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n[-] Exiting.")
             return
 
     if not query:
