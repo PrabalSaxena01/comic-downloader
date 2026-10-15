@@ -29,6 +29,9 @@ from comic_downloader import (
     sanitize_folder_name,
     extract_issue_number,
     extract_year_from_text,
+    extract_subject_tags,
+    resolve_comic_year,
+    clean_canonical_title,
     search_archive_org,
     get_archive_files_for_item,
     parse_ai_json_targets,
@@ -261,6 +264,47 @@ def test_ephemeral_mode_payload():
         assert captured_payloads[1].get("ephemeral") is False
         print("  [✓] Explicit call respects ephemeral=False")
 
+def test_website_tags_and_accurate_years():
+    print("\n=== Test 12: Website Subject Tags & Canonical Year Resolution ===")
+    # 1. Subject tags extraction
+    mock_doc = {
+        "subject": ["x-men", "marvel comics", "house of x", "powers of x", "HoX"]
+    }
+    tags = extract_subject_tags(mock_doc)
+    assert "x-men" in tags and "house of x" in tags and len(tags) == 5
+    print("  [✓] Website tags correctly extracted and normalized from metadata.")
+
+    # 2. Title cleaning without losing subtitle
+    clean = clean_canonical_title("Batman: Year One (Part 1): Chapter One: Who I Am and How I Came to Be")
+    assert clean == "Batman Year One"
+    print(f"  [✓] Clean canonical title preserved storyline subtitle: '{clean}'")
+
+    # 3. Year resolution: Canonical AI year overrides digital upload date
+    res_yr = resolve_comic_year(
+        filename="House of X and Powers of X.pdf",
+        doc_title="House Of X/Powers Of X - X-Men Marvel Comics FULL",
+        doc_date="2021-07-19",
+        doc_year=2021,
+        doc_publicdate="2021-07-19 12:28:19",
+        matched_target={"title": "House of X", "year": 2019},
+        target_years=[2019]
+    )
+    assert res_yr == 2019, f"Expected 2019, got {res_yr}"
+    print(f"  [✓] Canonical AI year (2019) authoritative over archive upload timestamp (2021).")
+
+    # 4. Year resolution: Archive date distinct from upload date
+    res_yr2 = resolve_comic_year(
+        filename="Batman_Year_One.cbz",
+        doc_title="Batman Year One",
+        doc_date="1987-01-01",
+        doc_year=1987,
+        doc_publicdate="2026-02-19 14:55:01",
+        matched_target={"title": "Batman Year One", "year": 1987},
+        target_years=[1987]
+    )
+    assert res_yr2 == 1987, f"Expected 1987, got {res_yr2}"
+    print(f"  [✓] Original print publication date (1987) prioritized over recent upload year (2026).")
+
 if __name__ == "__main__":
     print("=" * 60)
     print("RUNNING UNIT TESTS FOR COMIC CHRONOLOGY DOWNLOADER")
@@ -276,6 +320,7 @@ if __name__ == "__main__":
     test_live_virtual_middleware_query()
     test_cli_selection_features()
     test_ephemeral_mode_payload()
+    test_website_tags_and_accurate_years()
     print("\n" + "=" * 60)
     print(">>> ALL TESTS PASSED SUCCESSFULLY! <<<")
     print("=" * 60)
