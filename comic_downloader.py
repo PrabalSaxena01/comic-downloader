@@ -523,21 +523,131 @@ def extract_year_from_text(text: str) -> Optional[int]:
     return None
 
 
-def search_archive_org(query: str, max_results: int = 5) -> List[Dict[str, Any]]:
-    """Searches open comic archives on Archive.org."""
-    clean_q = re.sub(r'Vol\.\s*\d+', '', query, flags=re.IGNORECASE)
-    clean_q = re.sub(r'[#:\(\)\/]', ' ', clean_q).strip()
-    words = clean_q.split()[:5]
-    search_term = " ".join(words)
-    encoded = urllib.parse.quote(search_term)
+def is_junk_filename(name: str) -> bool:
+    """Detects derivative, auxiliary, or non-comic document filenames."""
+    lower = name.lower()
+    junk_patterns = [
+        "_daisy", "_thumb", "_jp2.zip", "_text.pdf", "meta.xml", "files.xml",
+        "complaint", "hearing", "reusablelaunc", "alaska", "records", "microform",
+        "mission", "manual", "thesis", "report", "_bw.pdf", "encrypted.pdf",
+        "_djvu", "_chcr", "_meta", "scans_inbox"
+    ]
+    return any(p in lower for p in junk_patterns)
 
+
+def get_title_keywords(title: str) -> List[str]:
+    """Extracts significant search/matching words from a title."""
+    clean = re.sub(r'#\s*\d+|Vol\.\s*\d+|\(.*?\)|\[.*?\]|:\s*.*', '', title).strip().lower()
+    words = [w for w in re.split(r'[^a-z0-9]+', clean) if w and w not in ["the", "and", "vol", "for", "with", "from"]]
+    return words
+
+
+def is_relevant_comic_file(
+    filename: str,
+    doc_title: str,
+    query: str,
+    ai_targets: List[Dict[str, Any]]
+) -> bool:
+    """Verifies that a discovered file or item actually pertains to the comic query or AI targets."""
+    if is_junk_filename(filename):
+        return False
+
+    name_lower = filename.lower()
+    doc_lower = doc_title.lower()
+
+    # Collect candidate terms
+    candidate_terms = [query] + [t.get("title", "") for t in ai_targets] + [t.get("search_query", "") for t in ai_targets if t.get("search_query")]
+
+    for term in candidate_terms:
+        if not term:
+            continue
+        words = get_title_keywords(term)
+        if not words:
+            continue
+        matches_fn = sum(1 for w in words if w in name_lower)
+        matches_doc = sum(1 for w in words if w in doc_lower)
+
+        # Match in filename (at least half of the words, or at least 1 word if short)
+        needed = max(1, len(words) // 2) if len(words) > 2 else len(words)
+        if matches_fn >= needed:
+            return True
+        # For comic archive formats (.cbz, .cbr), doc_title match is sufficient
+        ext = filename.lower().split('.')[-1] if '.' in filename else ''
+        if ext in ["cbz", "cbr"] and matches_doc >= needed:
+            return True
+        # For PDF, require both doc match AND at least 1 keyword in filename to avoid random PDFs
+        if ext in ["pdf", "zip"] and matches_doc == len(words) and any(w in name_lower for w in words):
+            return True
+
+    return False
+
+
+def match_file_to_ai_target(
+    filename: str,
+    doc_title: str,
+    file_issue_num: Optional[float],
+    ai_targets: List[Dict[str, Any]]
+) -> Tuple[Optional[Dict[str, Any]], Optional[int]]:
+    """
+    Accurately pairs a file with the most specific matching canonical AI target.
+    Returns (matched_target, target_index).
+    """
+    fn_lower = filename.lower()
+    doc_lower = doc_title.lower()
+
+    # Pass 1: Strict match on BOTH filename title keywords AND issue number
+    for idx, t in enumerate(ai_targets):
+        t_words = get_title_keywords(t.get("title", ""))
+        if t_words and all(w in fn_lower for w in t_words):
+            t_iss = t.get("issue_num")
+            if t_iss is not None and file_issue_num is not None:
+                if int(t_iss) == int(file_issue_num):
+                    return t, idx
+
+    # Pass 2: Strict match on filename title keywords (collections / TPBs / unnumbered)
+    for idx, t in enumerate(ai_targets):
+        t_words = get_title_keywords(t.get("title", ""))
+        if t_words and all(w in fn_lower for w in t_words):
+            return t, idx
+
+    # Pass 3: Match on archive doc_title keywords AND issue number
+    for idx, t in enumerate(ai_targets):
+        t_words = get_title_keywords(t.get("title", ""))
+        if t_words and all(w in doc_lower for w in t_words):
+            t_iss = t.get("issue_num")
+            if t_iss is not None and file_issue_num is not None:
+                if int(t_iss) == int(file_issue_num):
+                    return t, idx
+
+    # Pass 4: Match on archive doc_title keywords only
+    for idx, t in enumerate(ai_targets):
+        t_words = get_title_keywords(t.get("title", ""))
+        if t_words and all(w in doc_lower for w in t_words):
+            return t, idx
+
+    return None, None
+
+
+def search_archive_org(query: str, max_results: int = 5) -> List[Dict[str, Any]]:
+    """Searches open comic archives on Archive.org with structured query syntax."""
+    clean = re.sub(r'#\s*\d+|Vol\.\s*\d+|\(.*?\)|\[.*?\]|:\s*.*', '', query).strip()
+    clean = re.sub(r'[^a-zA-Z0-9\s\-]', ' ', clean).strip()
+    words = [w for w in clean.split()[:4] if w]
+    if not words:
+        return []
+    phrase = " ".join(words)
+
+    # 1. Exact phrase match in title within comic collections (highest relevance)
+    solr_q = (
+        f'mediatype:texts AND title:"{phrase}" AND '
+        f'(format:cbz OR format:cbr OR subject:comic OR collection:comics_inbox OR '
+        f'collection:comicbooksamy OR collection:folkscanomy_comics)'
+    )
     url = (
         f"https://archive.org/advancedsearch.php?"
-        f"q=mediatype:texts+AND+title:({encoded})+AND+(format:cbz+OR+format:cbr+OR+subject:comic+OR+subject:comics+OR+collection:comicbooksamy+OR+collection:comics_inbox+OR+description:comic)"
-        f"&fl[]=identifier,title,downloads,year,description"
+        f"q={urllib.parse.quote(solr_q)}&fl[]=identifier,title,downloads,year,description"
         f"&sort[]=downloads+desc&rows={max_results}&output=json"
     )
-
     req = urllib.request.Request(url, headers={"User-Agent": "AntigravityComicChronology/3.0"})
     try:
         with urllib.request.urlopen(req, timeout=12) as res:
@@ -548,10 +658,35 @@ def search_archive_org(query: str, max_results: int = 5) -> List[Dict[str, Any]]
     except Exception:
         pass
 
-    # Fallback to general title search
+    # 2. Conjunction query: all significant words in title (e.g. multi-word titles)
+    and_words = [w for w in words if w.lower() not in ["the", "and", "of"]]
+    if and_words:
+        and_clauses = " AND ".join(f"title:{w}" for w in and_words)
+        solr_q2 = (
+            f'mediatype:texts AND ({and_clauses}) AND '
+            f'(format:cbz OR format:cbr OR subject:comic OR collection:comics_inbox OR '
+            f'collection:comicbooksamy OR collection:folkscanomy_comics)'
+        )
+        url2 = (
+            f"https://archive.org/advancedsearch.php?"
+            f"q={urllib.parse.quote(solr_q2)}&fl[]=identifier,title,downloads,year,description"
+            f"&sort[]=downloads+desc&rows={max_results}&output=json"
+        )
+        req = urllib.request.Request(url2, headers={"User-Agent": "AntigravityComicChronology/3.0"})
+        try:
+            with urllib.request.urlopen(req, timeout=12) as res:
+                data = json.loads(res.read().decode())
+                docs = data.get("response", {}).get("docs", [])
+                if docs:
+                    return docs
+        except Exception:
+            pass
+
+    # 3. Fallback to general title search
+    encoded_phrase = urllib.parse.quote(f'title:("{phrase}")')
     url_fallback = (
         f"https://archive.org/advancedsearch.php?"
-        f"q=mediatype:texts+AND+title:({encoded})"
+        f"q=mediatype:texts+AND+{encoded_phrase}"
         f"&fl[]=identifier,title,downloads,year,description"
         f"&sort[]=downloads+desc&rows={max_results}&output=json"
     )
@@ -580,7 +715,7 @@ def get_archive_files_for_item(identifier: str) -> List[Dict[str, Any]]:
                 ext = name.lower().split(".")[-1] if "." in name else ""
                 if ext in ["cbz", "cbr", "pdf", "zip"]:
                     # Filter out non-comic archives or auxiliary derivative files
-                    if any(bad in name.lower() for bad in ["_daisy", "_thumb", "_jp2.zip", "_text.pdf", "meta.xml", "files.xml"]):
+                    if is_junk_filename(name):
                         continue
                     size_bytes = int(f.get("size", 0) or 0)
                     size_mb = round(size_bytes / (1024 * 1024), 2)
@@ -613,6 +748,9 @@ def discover_available_comics(
     discovered_identifiers = set()
     best_by_group = {}
 
+    # Target canonical years
+    target_years = [t.get("year", 0) for t in ai_targets if t.get("year", 0) and 1930 <= t.get("year", 0) <= 2026]
+
     # Collect search terms: overall query first, then clean AI target titles & search_queries
     search_queries = [query]
     for target in ai_targets:
@@ -627,8 +765,8 @@ def discover_available_comics(
             if len(p) >= 3 and p.lower() != query.lower() and p not in search_queries:
                 search_queries.append(p)
 
-    for s_idx, q in enumerate(search_queries[:10], 1):
-        print(f"    [{s_idx}/{min(len(search_queries), 10)}] Searching: '{q}'...")
+    for s_idx, q in enumerate(search_queries[:12], 1):
+        print(f"    [{s_idx}/{min(len(search_queries), 12)}] Searching: '{q}'...")
         docs = search_archive_org(q, max_results=4)
         for doc in docs:
             ident = doc.get("identifier")
@@ -652,50 +790,71 @@ def discover_available_comics(
                     continue
                 seen_urls.add(f["download_url"])
 
-                # De-duplicate by normalized filename
+                # De-duplicate identical download URLs
                 norm_name = re.sub(r'[\s_\-]+', '_', f["name"].lower().strip())
                 if norm_name in seen_filenames:
                     continue
                 seen_filenames.add(norm_name)
 
-                file_issue_num = extract_issue_number(f["name"]) or extract_issue_number(doc_title) or 0
-                file_year = extract_year_from_text(f["name"]) or doc_year
+                # Relevance validation: discard non-comic government filings, microfilms, or unrelated files
+                if not is_relevant_comic_file(f["name"], doc_title, query, ai_targets):
+                    continue
 
-                # Attempt to match with AI target metadata
-                matched_target = None
-                for target in ai_targets:
-                    t_issue = target.get("issue_num", 0)
-                    if t_issue and file_issue_num and int(t_issue) == int(file_issue_num):
-                        matched_target = target
-                        break
+                file_issue_num = extract_issue_number(f["name"]) or extract_issue_number(doc_title)
 
-                if not matched_target and ai_targets:
-                    # Match by name or default to first target
-                    for target in ai_targets:
-                        t_title = target.get("title", "").lower()
-                        if any(w in f["name"].lower() for w in t_title.split()[:2]):
-                            matched_target = target
-                            break
+                # Match with AI canonical targets
+                matched_target, target_order_idx = match_file_to_ai_target(
+                    f["name"],
+                    doc_title,
+                    file_issue_num,
+                    ai_targets
+                )
 
-                final_year = file_year or (matched_target.get("year", 0) if matched_target else 0)
+                # Accurate Date Resolution Hierarchy:
+                # 1. Explicit 4-digit year in filename (e.g. "Batman 404 (1987).cbz")
+                file_yr = extract_year_from_text(f["name"])
+                # 2. Canonical AI publication year (authoritative for series, e.g. 2019 for House of X)
+                target_yr = matched_target.get("year", 0) if matched_target else 0
+                # 3. Archive.org doc_year (only if between 1930 and 2026)
+                valid_doc_yr = doc_year if (doc_year and 1930 <= doc_year <= 2026) else 0
+
+                if file_yr and 1930 <= file_yr <= 2026:
+                    final_year = file_yr
+                elif target_yr and 1930 <= target_yr <= 2026:
+                    final_year = target_yr
+                elif valid_doc_yr:
+                    final_year = valid_doc_yr
+                elif target_years:
+                    final_year = target_years[0]
+                else:
+                    final_year = 0
+
                 final_author = matched_target.get("author", "N/A") if matched_target else "N/A"
                 final_synopsis = matched_target.get("synopsis", "") if matched_target else ""
-                display_title = (
-                    f"#{int(file_issue_num)}: {matched_target.get('title')}"
-                    if matched_target and file_issue_num
-                    else f.get("name")
-                )
+
                 # Format Prioritization: CBZ (1) > CBR (2) > ZIP (3) > PDF (4, Fallback)
                 format_ranks = {"CBZ": 1, "CBR": 2, "ZIP": 3, "PDF": 4}
                 file_fmt = f["format"].upper()
                 fmt_rank = format_ranks.get(file_fmt, 99)
 
-                clean_stem = re.sub(r'[\s_\-]+', '_', Path(f["name"]).stem.lower())
-                clean_stem = re.sub(r'\([^\)]*\)', '', clean_stem).strip('_')
-                if file_issue_num and file_issue_num > 0:
-                    group_key = f"issue_{int(file_issue_num)}"
+                # Compute display title and series-scoped group key
+                if matched_target:
+                    s_id = re.sub(r'[^a-z0-9]+', '_', matched_target.get("title", "").lower()).strip('_')
+                    issue_tag = f"#{int(file_issue_num)}" if file_issue_num else "tpb"
+                    group_key = f"{s_id}_{issue_tag}"
+                    display_title = (
+                        f"{matched_target.get('title')} #{int(file_issue_num)}"
+                        if file_issue_num
+                        else matched_target.get("title")
+                    )
                 else:
-                    group_key = f"stem_{clean_stem}"
+                    clean_stem = re.sub(r'[\(\[\{].*?[\)\]\}]', '', Path(f["name"]).stem.lower())
+                    clean_stem = re.sub(r'#?\s*\d+(?:\.\d+)?', '', clean_stem)
+                    clean_stem = re.sub(r'vol\.\s*\d+', '', clean_stem)
+                    s_id = re.sub(r'[^a-z0-9]+', '_', clean_stem).strip('_')
+                    issue_tag = f"#{int(file_issue_num)}" if file_issue_num else "extra"
+                    group_key = f"{s_id}_{issue_tag}"
+                    display_title = f["name"]
 
                 item_entry = {
                     "filename": f["name"],
@@ -705,7 +864,8 @@ def discover_available_comics(
                     "size_mb": f["size_mb"],
                     "download_url": f["download_url"],
                     "year": final_year,
-                    "issue_num": file_issue_num,
+                    "issue_num": file_issue_num or 0,
+                    "order_idx": target_order_idx if target_order_idx is not None else 9999,
                     "author": final_author,
                     "synopsis": final_synopsis,
                     "archive_title": doc_title,
@@ -715,7 +875,7 @@ def discover_available_comics(
                     "canonical_title": matched_target.get("title") if matched_target else None
                 }
 
-                # If we haven't seen this issue/stem yet, or new format has higher priority (lower rank)
+                # Format De-duplication: Keep best format for the exact same series issue
                 if group_key not in best_by_group:
                     best_by_group[group_key] = item_entry
                 else:
@@ -725,16 +885,21 @@ def discover_available_comics(
 
     discovered = list(best_by_group.values())
 
-    # Sort in chronological order (Year ascending, Issue Number ascending)
+    # Sort in chronological canonical reading order:
+    # 1. Publication year (valid years first)
+    # 2. AI reading order index (canonical sequence prescribed by Antigravity advisor)
+    # 3. Issue number
+    # 4. Format priority rank
+    # 5. Filename
     discovered.sort(key=lambda x: (
-        x["year"] if x["year"] and x["year"] > 1900 else 9999,
+        x["year"] if x["year"] and x["year"] >= 1930 else 9999,
+        x.get("order_idx") if x.get("order_idx") is not None else 9999,
         x["issue_num"] if x["issue_num"] else 9999,
         x["fmt_rank"],
         x["filename"].lower()
     ))
 
     # Determine recommended folder name
-    target_years = [t.get("year", 0) for t in ai_targets if t.get("year", 0) and t.get("year", 0) >= 1930]
     first_year = target_years[0] if target_years else next((d["year"] for d in discovered if d["year"] and d["year"] >= 1930), None)
     year_tag = f" ({first_year})" if first_year else ""
     folder_name = sanitize_folder_name(f"{query.title()}{year_tag}")
