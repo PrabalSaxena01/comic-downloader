@@ -1,17 +1,28 @@
 # 📚 Antigravity Comic Chronology Finder & Bulk Downloader
 
-An intelligent comic run finder and downloader powered by the **Antigravity AI Advisor** and **Open Digital Comic Archives**.
-Enter any comic title, character, or storyline, receive canonical reading orders sorted in chronological order, interactively select the issues you want to read, and download them cleanly into a dedicated folder.
+An intelligent comic run finder and bulk downloader powered by the **Antigravity Safe Keyless Virtual Middleware** and **Open Digital Comic Archives**.
+Enter any comic title, character, storyline, or era (e.g. `X men Krakoa era`, `Batman Year One`, `House of X`), receive canonical reading orders sorted in chronological order, interactively select the issues you want to read, and download them cleanly into a dedicated folder.
+
+---
+
+## 🛡️ Core Architecture: Zero Client Keys
+
+Following the hardened architecture in `antigravity_server/Instruction`:
+- **No Secret Client Keys Stored**: Authorization is handled automatically via a high-entropy 128-bit public route slug (`/p/pub_.../v1`).
+- **Token Drain Guard Compliance**: Uses `effort: "low"` and bounded payloads to prevent unnecessary compute exhaustion.
+- **Universal Connection**: Works seamlessly locally (`http://127.0.0.1:8000/p/<slug>/v1`), across home Wi-Fi LAN, or remotely over secure Cloudflare Tunnels (`https://<tunnel>.trycloudflare.com/p/<slug>/v1`).
 
 ---
 
 ## 🔒 Features
 
 1. **Antigravity AI Advisor**:
-   Fetches canonical chronological reading orders, creative teams (writers and artists), publication years, and synopses. Supports both **Antigravity Gateway API keys** (`agy_app_...`) and standard **Google Gemini API keys** (`AIzaSy...`), with automatic fallback to direct archive matching.
+   Fetches canonical chronological reading orders, creative teams (writers and artists), publication years, and continuity synopses via the Keyless Virtual Middleware endpoint.
+   - Automatically breaks down complex multi-series comic eras (e.g. *Krakoa Era*, *Dawn of X*, *Secret Wars*) into their essential chronological issues.
+   - Falls back gracefully to authenticated API keys, local `agy` CLI, or direct archive matching if the gateway is offline.
 2. **Open Comic Archive Search & Format Prioritization**:
    Searches digital comic archives and strictly prioritizes formats: **CBZ > CBR > ZIP > PDF**.
-   - If a `.cbz` or `.cbr` version exists for an issue or run, any redundant `.pdf` duplicate is automatically suppressed.
+   - If a `.cbz` or `.cbr` version exists for an issue or run, redundant `.pdf` duplicates are automatically suppressed.
    - `.pdf` is kept strictly as a fallback if no digital comic archive format is available.
    - Comic scan `.zip` files are automatically handled as `.cbz`.
 3. **Chronological Issue Display**:
@@ -21,51 +32,48 @@ Enter any comic title, character, or storyline, receive canonical reading orders
 5. **Approval Confirmation Gate ("Click Yes")**:
    Before downloading, displays a review card of selected issues, total size in MB, and destination folder. Downloads proceed only after you confirm (`[Y/n]` / Yes).
 6. **Dedicated Folder Organization**:
-   Automatically creates a cleanly named folder (e.g. `downloads/Spider-Man Blue (2002)`) and streams downloads with active progress bars.
+   Automatically creates a cleanly named folder (e.g. `downloads/X Men Krakoa Era (2019)`) and streams downloads with active progress bars.
 
 ---
 
-## 🚀 Usage
+## 🚀 Quick Start
 
-### 1. Interactive Mode
-Run the script directly:
+### 1. Zero-Key Run
+The downloader connects to your Antigravity Virtual Middleware out-of-the-box:
 ```bash
 python comic_downloader.py
 ```
 *(or run `python comic.py`)*
 
-1. Enter your comic name or run (e.g., `Batman: Year One`, `Spider-Man Blue`, `Flashpoint`, `Court of Owls`).
-2. When prompted, enter your Antigravity API key (you can choose to save it to `.env` so you don't have to enter it again).
-3. Use the arrow keys and `SPACE` to pick issues to read, then press `ENTER`.
-4. Review the download card and confirm with `Y`.
-
-### 2. Direct CLI Query Mode
+### 2. Direct Query
 ```bash
-python comic_downloader.py "Batman: Year One"
+python comic_downloader.py "X men Krakoa era"
 ```
-Or with an API key directly:
+
+### 3. Remote Cloudflare Tunnel Endpoint
+If running against a remote Antigravity server via Cloudflare Tunnel:
 ```bash
-python comic_downloader.py "Spider-Man Blue" --key YOUR_ANTIGRAVITY_API_KEY
+python comic_downloader.py "House of X" --endpoint https://<your-tunnel>.trycloudflare.com/p/pub_b93935784aff3f67d55d904e7e43f30f/v1
 ```
 
 ---
 
-## 🔑 API Key Configuration Options
+## ⚙️ Configuration (`.env`)
 
-You can provide your Antigravity API key in any of the following ways:
-1. **Interactive Prompt**: The script prompts you on first run and offers to save it to `.env`.
-2. **Environment Variable**: Set `ANTIGRAVITY_APP_KEY=your_key` or `AGY_API_KEY=your_key`.
-3. **Command Line Flag**: Pass `--key your_key`.
-4. **Local `.env` File**: Create `.env` in this directory:
-   ```env
-   ANTIGRAVITY_APP_KEY=your_key_here
-   ```
+Configure your connection settings in `.env`:
+```ini
+# Safe Keyless Virtual Middleware Endpoint (Zero Client Keys)
+ANTIGRAVITY_ENDPOINT=http://127.0.0.1:8000/p/pub_b93935784aff3f67d55d904e7e43f30f/v1
+
+# AI Model Selection
+ANTIGRAVITY_MODEL=gemini-2.5-flash
+```
 
 ---
 
 ## 🧪 Running Tests
 
-To verify the installation and archive discovery:
+To verify the installation, format prioritization, and Virtual Middleware integration:
 ```bash
 python tests/test_comic_downloader.py
 ```

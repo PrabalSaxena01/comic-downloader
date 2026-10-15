@@ -42,13 +42,15 @@ DOWNLOADS_ROOT = BASE_DIR / "downloads"
 DOWNLOADS_ROOT.mkdir(parents=True, exist_ok=True)
 ENV_FILE = BASE_DIR / ".env"
 
-# Default Gateway Settings
+# Virtual Middleware & Gateway Settings (Zero Client Keys Architecture)
+DEFAULT_PUB_SLUG = "pub_b93935784aff3f67d55d904e7e43f30f"
 DEFAULT_GATEWAY_URL = os.getenv("ANTIGRAVITY_GATEWAY_URL", "http://127.0.0.1:8000")
+DEFAULT_ENDPOINT = os.getenv("ANTIGRAVITY_ENDPOINT") or os.getenv("ANTIGRAVITY_VIRTUAL_URL") or f"{DEFAULT_GATEWAY_URL}/p/{DEFAULT_PUB_SLUG}/v1"
 DEFAULT_MODEL = os.getenv("ANTIGRAVITY_MODEL", "gemini-2.5-flash")
 
 
 # ===================================================================
-# 1. Environment & API Key Management
+# 1. Environment & Endpoint Resolution (Zero Client Keys)
 # ===================================================================
 
 def load_local_env() -> Dict[str, str]:
@@ -82,10 +84,53 @@ def save_key_to_env(key: str):
         print(f"  [!] Notice: Could not write key to .env ({e})")
 
 
+def resolve_virtual_middleware_url(
+    endpoint: Optional[str] = None,
+    pub_slug: Optional[str] = None,
+    gateway_url: str = DEFAULT_GATEWAY_URL
+) -> str:
+    """
+    Resolves the full chat completions URL for Antigravity Virtual Middleware.
+    Follows: D:/Nokia_Interview_Prep/antigravity_server/Instruction/01_QUICK_START_CONNECT_NEW_APP.md
+    """
+    local_env = load_local_env()
+    ep = (endpoint or "").strip()
+    if not ep:
+        ep = (
+            os.getenv("ANTIGRAVITY_ENDPOINT")
+            or os.getenv("ANTIGRAVITY_VIRTUAL_URL")
+            or local_env.get("ANTIGRAVITY_ENDPOINT")
+            or local_env.get("ANTIGRAVITY_VIRTUAL_URL")
+            or ""
+        ).strip()
+
+    if not ep:
+        slug = (
+            pub_slug
+            or os.getenv("ANTIGRAVITY_PUB_SLUG")
+            or local_env.get("ANTIGRAVITY_PUB_SLUG")
+            or DEFAULT_PUB_SLUG
+        ).strip().lstrip("/")
+        gw = (
+            gateway_url
+            or os.getenv("ANTIGRAVITY_GATEWAY_URL")
+            or local_env.get("ANTIGRAVITY_GATEWAY_URL")
+            or DEFAULT_GATEWAY_URL
+        ).strip().rstrip("/")
+        return f"{gw}/p/{slug}/v1/chat/completions"
+
+    ep = ep.rstrip("/")
+    if ep.endswith("/chat/completions"):
+        return ep
+    if ep.endswith("/v1"):
+        return f"{ep}/chat/completions"
+    return f"{ep}/v1/chat/completions"
+
+
 def get_api_key(cli_key: Optional[str] = None) -> Optional[str]:
     """
-    Resolves the Antigravity API key from CLI args, environment, .env file,
-    or prompts the user.
+    Resolves an optional Antigravity API key from CLI args, environment, or .env file.
+    Note: Under the Virtual Middleware architecture, client secret keys are NOT required.
     """
     def is_valid_key(k: Optional[str]) -> bool:
         if not k:
@@ -108,24 +153,6 @@ def get_api_key(cli_key: Optional[str] = None) -> Optional[str]:
     if is_valid_key(local_env.get("AGY_API_KEY")):
         return local_env["AGY_API_KEY"].strip()
 
-    # Interactive prompt if running interactively
-    if sys.stdin.isatty():
-        print("\n" + "=" * 70)
-        print("  🔑 ANTIGRAVITY API KEY CONFIGURATION")
-        print("=" * 70)
-        print("  To consult Antigravity AI Advisor for canonical reading orders,")
-        print("  please enter your Antigravity API key.")
-        print("  (Or press ENTER to use the local 'agy' CLI / direct search fallback)\n")
-        try:
-            user_input = input("  Antigravity API Key: ").strip()
-            if user_input:
-                save_choice = input("  Save key to .env for future runs? [Y/n]: ").strip().lower()
-                if save_choice in ("", "y", "yes"):
-                    save_key_to_env(user_input)
-                return user_input
-        except (EOFError, KeyboardInterrupt):
-            pass
-
     return None
 
 
@@ -133,31 +160,17 @@ def get_api_key(cli_key: Optional[str] = None) -> Optional[str]:
 # 2. Antigravity AI Advisor (Reading Order & Metadata)
 # ===================================================================
 
-def call_gateway_ai(
+def call_virtual_middleware_ai(
     prompt: str,
-    api_key: Optional[str] = None,
-    gateway_url: str = DEFAULT_GATEWAY_URL,
+    endpoint_url: str,
     model: str = DEFAULT_MODEL
 ) -> Optional[List[Dict[str, Any]]]:
     """
-    Calls the Antigravity Gateway API at gateway_url/v1/chat/completions.
-    Returns structured list of comic issues or None if server unreachable.
+    Calls the Antigravity Keyless Virtual Middleware Route.
+    Architectural Principle: Zero Client Keys.
+    Authorization is validated via the 128-bit slug in the URL path.
+    Header 'Authorization: Bearer none' is transmitted.
     """
-    if not api_key:
-        return None
-
-    if api_key.startswith("AIza"):
-        url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
-        active_model = model if model.startswith("gemini") else "gemini-2.5-flash"
-    else:
-        url = f"{gateway_url.rstrip('/')}/v1/chat/completions"
-        active_model = model
-
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
-    }
-
     user_prompt = (
         f"You are an expert comic book archivist and historian. For the comic run, character, or storyline '{prompt}', "
         "provide a canonical chronological reading order breakdown of the essential comic issues or runs.\n"
@@ -176,12 +189,71 @@ def call_gateway_ai(
     )
 
     payload = {
-        "model": active_model,
+        "model": model,
+        "messages": [
+            {"role": "user", "content": user_prompt}
+        ],
+        "temperature": 0.2,
+        "effort": "low",
+        "stream": False
+    }
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer none"
+    }
+
+    try:
+        req = urllib.request.Request(
+            endpoint_url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers=headers,
+            method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=60) as res:
+            data = json.loads(res.read().decode("utf-8", errors="replace"))
+            content = data["choices"][0]["message"]["content"]
+            return parse_ai_json_targets(content)
+    except Exception:
+        return None
+
+
+def call_authenticated_gateway_ai(
+    prompt: str,
+    api_key: str,
+    url: str,
+    model: str = DEFAULT_MODEL
+) -> Optional[List[Dict[str, Any]]]:
+    """Fallback: Calls standard authenticated gateway with a secret Bearer key."""
+    user_prompt = (
+        f"You are an expert comic book archivist and historian. For the comic run, character, or storyline '{prompt}', "
+        "provide a canonical chronological reading order breakdown of the essential comic issues or runs.\n"
+        "Return ONLY a valid JSON array of objects in this exact format:\n"
+        "[\n"
+        "  {\n"
+        '    "title": "Exact Title of Run or Issue (e.g. House of X)",\n'
+        '    "year": 2019,\n'
+        '    "issue_num": 1,\n'
+        '    "author": "Creative Team (Writer and Artist)",\n'
+        '    "synopsis": "Concise 1-2 sentence plot and continuity summary",\n'
+        '    "search_query": "Clean archive search keywords (e.g. House of X)"\n'
+        "  }\n"
+        "]\n"
+        "Output ONLY the JSON array without any markdown conversational text."
+    )
+
+    payload = {
+        "model": model,
         "messages": [
             {"role": "user", "content": user_prompt}
         ],
         "temperature": 0.2,
         "effort": "low"
+    }
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
     }
 
     try:
@@ -191,13 +263,23 @@ def call_gateway_ai(
             headers=headers,
             method="POST"
         )
-        with urllib.request.urlopen(req, timeout=30) as res:
-            data = json.loads(res.read().decode())
+        with urllib.request.urlopen(req, timeout=60) as res:
+            data = json.loads(res.read().decode("utf-8", errors="replace"))
             content = data["choices"][0]["message"]["content"]
             return parse_ai_json_targets(content)
-    except Exception as e:
-        # Gateway offline or endpoint failed
+    except Exception:
         return None
+
+
+def call_gemini_direct_ai(
+    prompt: str,
+    api_key: str,
+    model: str = DEFAULT_MODEL
+) -> Optional[List[Dict[str, Any]]]:
+    """Fallback: Calls Google Generative Language API directly if AIza key provided."""
+    url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+    active_model = model if model.startswith("gemini") else "gemini-2.5-flash"
+    return call_authenticated_gateway_ai(prompt, api_key=api_key, url=url, model=active_model)
 
 
 def call_agy_cli_advisor(prompt: str) -> Optional[List[Dict[str, Any]]]:
@@ -218,7 +300,7 @@ def call_agy_cli_advisor(prompt: str) -> Optional[List[Dict[str, Any]]]:
             ["agy", "-p", cli_prompt, "--disable-slash-commands"],
             capture_output=True,
             text=True,
-            timeout=40
+            timeout=45
         )
         if result.returncode == 0 and result.stdout.strip():
             return parse_ai_json_targets(result.stdout)
@@ -227,35 +309,69 @@ def call_agy_cli_advisor(prompt: str) -> Optional[List[Dict[str, Any]]]:
     return None
 
 
+def _normalize_targets(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    clean_items = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        clean_items.append({
+            "title": item.get("title", "Unknown Title"),
+            "year": int(item.get("year", 0)) if str(item.get("year", 0)).isdigit() else 0,
+            "issue_num": item.get("issue_num", 0),
+            "author": item.get("author", "Unknown Creator"),
+            "synopsis": item.get("synopsis", ""),
+            "search_query": item.get("search_query") or item.get("title", "")
+        })
+    return clean_items
+
+
 def parse_ai_json_targets(content: str) -> List[Dict[str, Any]]:
     """Extracts JSON or markdown reading order list of targets from text content."""
-    json_match = re.search(r'\[\s*\{.*?\}\s*\]', content, re.DOTALL)
+    if not content:
+        return []
+
+    # 1. First attempt: Direct JSON or stripped markdown code fences
+    stripped = content.strip()
+    if stripped.startswith("```"):
+        stripped = re.sub(r"^```(?:json)?\s*", "", stripped)
+        stripped = re.sub(r"\s*```$", "", stripped).strip()
+
+    try:
+        items = json.loads(stripped)
+        if isinstance(items, list):
+            return _normalize_targets(items)
+    except Exception:
+        pass
+
+    # 2. Second attempt: Outermost brackets match [ ... ]
+    start = content.find("[")
+    end = content.rfind("]")
+    if start != -1 and end != -1 and end > start:
+        try:
+            items = json.loads(content[start:end + 1])
+            if isinstance(items, list):
+                return _normalize_targets(items)
+        except Exception:
+            pass
+
+    # 3. Third attempt: Regex bracket matching with object detection
+    json_match = re.search(r'\[\s*\{.*\}\s*\]', content, re.DOTALL)
     if json_match:
         try:
             items = json.loads(json_match.group(0))
             if isinstance(items, list):
-                clean_items = []
-                for item in items:
-                    clean_items.append({
-                        "title": item.get("title", "Unknown Title"),
-                        "year": int(item.get("year", 0)) if str(item.get("year", 0)).isdigit() else 0,
-                        "issue_num": item.get("issue_num", 0),
-                        "author": item.get("author", "Unknown Creator"),
-                        "synopsis": item.get("synopsis", ""),
-                        "search_query": item.get("search_query") or item.get("title", "")
-                    })
-                return clean_items
+                return _normalize_targets(items)
         except Exception:
             pass
 
-    # Markdown list fallback (e.g. 1. **House of X / Powers of X** (2019))
+    # 4. Fallback: Markdown numbered list parsing (e.g. 1. **House of X** (2019))
     md_matches = re.findall(r'^\s*(\d+)\.\s+\*\*([^*]+)\*\*(.*)', content, re.MULTILINE)
     if not md_matches:
         md_matches = re.findall(r'^\s*(\d+)\.\s+([^\n\r]+)', content, re.MULTILINE)
 
     if md_matches:
         clean_items = []
-        for match in md_matches[:12]:
+        for match in md_matches[:16]:
             num_str = match[0]
             raw_title = match[1].strip()
             extra = match[2] if len(match) > 2 else ""
@@ -264,7 +380,8 @@ def parse_ai_json_targets(content: str) -> List[Dict[str, Any]]:
                 continue
             if not clean_title or len(clean_title) < 3:
                 continue
-            yr = extract_year_from_text(extra) or extract_year_from_text(raw_title) or 0
+            yr_match = re.search(r'\b(19\d{2}|20\d{2})\b', extra or raw_title)
+            yr = int(yr_match.group(1)) if yr_match else 0
             clean_items.append({
                 "title": clean_title,
                 "year": yr,
@@ -281,32 +398,57 @@ def parse_ai_json_targets(content: str) -> List[Dict[str, Any]]:
 
 def fetch_comic_chronology_details(
     query: str,
+    endpoint: Optional[str] = None,
+    pub_slug: Optional[str] = None,
     api_key: Optional[str] = None,
     gateway_url: str = DEFAULT_GATEWAY_URL,
     model: str = DEFAULT_MODEL
 ) -> List[Dict[str, Any]]:
     """
-    Fetches reading order from Antigravity Gateway API or local agy CLI.
-    Falls back to a direct search target if AI advisor is completely offline.
+    Fetches reading order from Antigravity Virtual Middleware, Gateway API, or local agy CLI.
+    Priority:
+      1. Safe Keyless Virtual Middleware Route (/p/{slug}/v1) [Zero Client Keys]
+      2. Authenticated Gateway Route (/v1) if secret key explicitly provided
+      3. Google Gemini Direct API if AIza key provided
+      4. Local Antigravity 'agy' CLI
+      5. Direct archive query fallback
     """
     print(f"\n[*] Consulting Antigravity AI Advisor on '{query}'...")
-    
-    # Try Antigravity Gateway first if API key provided
-    if api_key:
-        print(f"    -> Querying Antigravity Gateway at {gateway_url}...")
-        targets = call_gateway_ai(query, api_key=api_key, gateway_url=gateway_url, model=model)
+
+    # 1. Keyless Virtual Middleware Route (Zero Client Keys)
+    virtual_url = resolve_virtual_middleware_url(endpoint=endpoint, pub_slug=pub_slug, gateway_url=gateway_url)
+    clean_display = virtual_url.split("/chat/completions")[0]
+    print(f"    -> Querying Antigravity Keyless Virtual Middleware at {clean_display}...")
+    targets = call_virtual_middleware_ai(prompt=query, endpoint_url=virtual_url, model=model)
+    if targets:
+        print(f"    [✓] Received {len(targets)} canonical issue(s) from Antigravity Virtual Middleware.")
+        return targets
+
+    # 2. Authenticated Gateway Route (if secret key provided)
+    if api_key and not api_key.startswith("AIza"):
+        gw_completions_url = f"{gateway_url.rstrip('/')}/v1/chat/completions"
+        print(f"    -> Querying Antigravity Gateway (API Key Auth) at {gw_completions_url}...")
+        targets = call_authenticated_gateway_ai(prompt=query, api_key=api_key, url=gw_completions_url, model=model)
         if targets:
             print(f"    [✓] Received {len(targets)} canonical issue(s) from Antigravity Gateway.")
             return targets
 
-    # Fallback to local agy CLI
+    # 3. Google Gemini Direct API (if AIza key provided)
+    if api_key and api_key.startswith("AIza"):
+        print("    -> Querying Google Generative Language API directly...")
+        targets = call_gemini_direct_ai(prompt=query, api_key=api_key, model=model)
+        if targets:
+            print(f"    [✓] Received {len(targets)} canonical issue(s) from Gemini API.")
+            return targets
+
+    # 4. Local Antigravity 'agy' CLI
     print("    -> Querying local Antigravity 'agy' CLI...")
     targets = call_agy_cli_advisor(query)
     if targets:
         print(f"    [✓] Received {len(targets)} canonical issue(s) from Antigravity CLI.")
         return targets
 
-    # Fallback target directly from user query
+    # 5. Direct search fallback
     print("    [!] AI advisor offline. Proceeding with direct archive search for query.")
     return [{
         "title": query,
@@ -463,9 +605,12 @@ def discover_available_comics(
     discovered_identifiers = set()
     best_by_group = {}
 
-    # Collect search terms: overall query first, then clean AI target titles
+    # Collect search terms: overall query first, then clean AI target titles & search_queries
     search_queries = [query]
     for target in ai_targets:
+        sq = target.get("search_query", "").strip()
+        if sq and sq.lower() != query.lower() and sq not in search_queries:
+            search_queries.append(sq)
         title = target.get("title", "")
         # Remove volume numbers, issue numbers, parentheses, subtitles after colon
         clean_title = re.sub(r'Vol\.\s*\d+|#\d+|\(.*?\)|:\s*.*', '', title).strip()
@@ -579,7 +724,8 @@ def discover_available_comics(
     ))
 
     # Determine recommended folder name
-    first_year = next((d["year"] for d in discovered if d["year"] and d["year"] > 1900), None)
+    target_years = [t.get("year", 0) for t in ai_targets if t.get("year", 0) and t.get("year", 0) >= 1930]
+    first_year = target_years[0] if target_years else next((d["year"] for d in discovered if d["year"] and d["year"] >= 1930), None)
     year_tag = f" ({first_year})" if first_year else ""
     folder_name = sanitize_folder_name(f"{query.title()}{year_tag}")
 
@@ -892,6 +1038,8 @@ def execute_bulk_downloads(selected_files: List[Dict[str, Any]], folder_name: st
 
 def run_comic_downloader(
     query: Optional[str] = None,
+    endpoint: Optional[str] = None,
+    pub_slug: Optional[str] = None,
     api_key: Optional[str] = None,
     gateway_url: str = DEFAULT_GATEWAY_URL,
     model: str = DEFAULT_MODEL
@@ -913,18 +1061,18 @@ def run_comic_downloader(
         print("[-] Empty query. Exiting.")
         return
 
-    # 2. Resolve API Key
+    # 2. Antigravity AI Advisor fetches reading order & canonical issue details
     resolved_key = get_api_key(api_key)
-
-    # 3. Antigravity AI Advisor fetches reading order & canonical issue details
     ai_targets = fetch_comic_chronology_details(
         query=query,
+        endpoint=endpoint,
+        pub_slug=pub_slug,
         api_key=resolved_key,
         gateway_url=gateway_url,
         model=model
     )
 
-    # 4. Search open archives & sort chronologically
+    # 3. Search open archives & sort chronologically
     available_comics, folder_name = discover_available_comics(query, ai_targets)
 
     if not available_comics:
@@ -932,36 +1080,48 @@ def run_comic_downloader(
         print("    Try adjusting the search query or using a specific character/issue name.\n")
         return
 
-    # 5. Interactive Selection
+    # 4. Interactive Selection
     selected_comics = interactive_checkbox_selector(available_comics, folder_name)
     if not selected_comics:
         print("[-] No comics selected for download.\n")
         return
 
-    # 6. User Approval Confirmation ("Click Yes")
+    # 5. User Approval Confirmation ("Click Yes")
     approved = confirm_approval_gate(selected_comics, folder_name)
     if not approved:
         return
 
-    # 7. Create Folder and Download
+    # 6. Create Folder and Download
     execute_bulk_downloads(selected_comics, folder_name)
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Antigravity Comic Chronology Finder & Bulk Downloader"
+        description="Antigravity Comic Chronology Finder & Bulk Downloader (Virtual Middleware Enabled)"
     )
     parser.add_argument(
         "query",
         nargs="?",
         default=None,
-        help="Comic name, run, or storyline (e.g. 'Batman Year One', 'Spider-Man Blue')"
+        help="Comic name, run, or storyline (e.g. 'Batman Year One', 'House of X', 'X men Krakoa era')"
+    )
+    parser.add_argument(
+        "--endpoint",
+        dest="endpoint",
+        default=None,
+        help="Antigravity Safe Keyless Virtual Middleware endpoint URL"
+    )
+    parser.add_argument(
+        "--pub-slug",
+        dest="pub_slug",
+        default=None,
+        help="Antigravity 128-bit public slug for keyless middleware (e.g. pub_b93935784aff3f67d55d904e7e43f30f)"
     )
     parser.add_argument(
         "--key",
         dest="api_key",
         default=None,
-        help="Antigravity API key"
+        help="Optional secret API key (for legacy gateway route / Gemini fallback)"
     )
     parser.add_argument(
         "--gateway",
@@ -973,12 +1133,14 @@ def main():
         "--model",
         dest="model",
         default=DEFAULT_MODEL,
-        help="Model name for Antigravity AI Advisor"
+        help="Model name for Antigravity AI Advisor (default: gemini-2.5-flash)"
     )
 
     args = parser.parse_args()
     run_comic_downloader(
         query=args.query,
+        endpoint=args.endpoint,
+        pub_slug=args.pub_slug,
         api_key=args.api_key,
         gateway_url=args.gateway_url,
         model=args.model

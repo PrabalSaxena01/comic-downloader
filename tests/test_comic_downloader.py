@@ -1,6 +1,17 @@
 #!/usr/bin/env python3
 """
 Test Suite for Antigravity Comic Chronology Finder & Downloader
+===============================================================
+Tests:
+  1. Folder Sanitization
+  2. Issue Number Extraction
+  3. Year Extraction
+  4. Chronological Sorting
+  5. Open Archive Search & File Discovery
+  6. AI JSON Parsing (Markdown fences, Outermost brackets, Fallbacks)
+  7. Format Priority (CBZ > CBR > ZIP > PDF)
+  8. Safe Keyless Virtual Middleware URL Resolution (Zero Client Keys)
+  9. Live Antigravity Virtual Middleware Chronology Query
 """
 import sys
 from pathlib import Path
@@ -19,7 +30,11 @@ from comic_downloader import (
     search_archive_org,
     get_archive_files_for_item,
     parse_ai_json_targets,
-    plain_text_selector
+    plain_text_selector,
+    resolve_virtual_middleware_url,
+    call_virtual_middleware_ai,
+    DEFAULT_PUB_SLUG,
+    DEFAULT_GATEWAY_URL
 )
 
 def test_sanitization():
@@ -124,6 +139,40 @@ def test_format_priority():
         assert tpb_items[0]["format"] in ["CBZ", "CBR"], f"Should prefer CBZ/CBR over PDF, got {tpb_items[0]['format']}"
         print(f"  [✓] Verified: TPB selected format is {tpb_items[0]['format']} (PDF suppressed as redundant fallback)")
 
+def test_virtual_middleware_resolution():
+    print("\n=== Test 8: Virtual Middleware URL Resolution ===")
+    # 1. Default slug resolution
+    url1 = resolve_virtual_middleware_url()
+    assert "/p/pub_" in url1 and url1.endswith("/v1/chat/completions")
+    print(f"  [✓] Default endpoint: {url1}")
+
+    # 2. Base URL normalization
+    url2 = resolve_virtual_middleware_url(endpoint="http://127.0.0.1:8000/p/pub_custom/v1")
+    assert url2 == "http://127.0.0.1:8000/p/pub_custom/v1/chat/completions"
+    print(f"  [✓] Normalized /v1 base: {url2}")
+
+    # 3. Cloudflare tunnel URL
+    url3 = resolve_virtual_middleware_url(endpoint="https://demo.trycloudflare.com/p/pub_tunnel")
+    assert url3 == "https://demo.trycloudflare.com/p/pub_tunnel/v1/chat/completions"
+    print(f"  [✓] Normalized tunnel endpoint: {url3}")
+
+def test_live_virtual_middleware_query():
+    print("\n=== Test 9: Live Antigravity Virtual Middleware Query ===")
+    url = resolve_virtual_middleware_url()
+    print(f"  [i] Querying Virtual Middleware: {url}")
+    targets = call_virtual_middleware_ai(
+        prompt="House of X and Powers of X",
+        endpoint_url=url,
+        model="gemini-2.5-flash"
+    )
+    if targets:
+        print(f"  [✓] Antigravity Advisor returned {len(targets)} canonical issue(s):")
+        for t in targets[:3]:
+            print(f"      - {t['title']} ({t['year']}) by {t['author']}")
+        assert len(targets) >= 1
+    else:
+        print("  [!] Antigravity Server is running in background or offline. Skipped live test.")
+
 if __name__ == "__main__":
     print("=" * 60)
     print("RUNNING UNIT TESTS FOR COMIC CHRONOLOGY DOWNLOADER")
@@ -135,6 +184,8 @@ if __name__ == "__main__":
     test_archive_search()
     test_json_parsing()
     test_format_priority()
+    test_virtual_middleware_resolution()
+    test_live_virtual_middleware_query()
     print("\n" + "=" * 60)
     print(">>> ALL TESTS PASSED SUCCESSFULLY! <<<")
     print("=" * 60)
