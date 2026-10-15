@@ -220,6 +220,38 @@ def test_cli_selection_features():
     finally:
         sys.stdin = saved_stdin
 
+def test_ephemeral_mode_payload():
+    print("\n=== Test 11: Mode C Ephemeral Payload Structure ===")
+    from unittest.mock import patch, MagicMock
+    import json
+
+    captured_payloads = []
+
+    def fake_urlopen(req, timeout=60):
+        body = json.loads(req.data.decode("utf-8"))
+        captured_payloads.append(body)
+        mock_res = MagicMock()
+        mock_res.read.return_value = json.dumps({
+            "choices": [{"message": {"content": '[{"title": "Test Issue", "year": 2020, "issue_num": 1}]'}}]
+        }).encode("utf-8")
+        # Support context manager
+        mock_res.__enter__.return_value = mock_res
+        mock_res.__exit__.return_value = None
+        return mock_res
+
+    with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        # 1. Default call (should be ephemeral=True)
+        res1 = call_virtual_middleware_ai("House of X", "http://127.0.0.1:8000/p/pub_123/v1/chat/completions")
+        assert len(captured_payloads) == 1
+        assert captured_payloads[0].get("ephemeral") is True, f"Default should be ephemeral=True, got {captured_payloads[0].get('ephemeral')}"
+        print("  [✓] Default call transmits ephemeral=True (Mode C Zero-Clutter)")
+
+        # 2. Explicit ephemeral=False
+        res2 = call_virtual_middleware_ai("House of X", "http://127.0.0.1:8000/p/pub_123/v1/chat/completions", ephemeral=False)
+        assert len(captured_payloads) == 2
+        assert captured_payloads[1].get("ephemeral") is False
+        print("  [✓] Explicit call respects ephemeral=False")
+
 if __name__ == "__main__":
     print("=" * 60)
     print("RUNNING UNIT TESTS FOR COMIC CHRONOLOGY DOWNLOADER")
@@ -234,6 +266,7 @@ if __name__ == "__main__":
     test_virtual_middleware_resolution()
     test_live_virtual_middleware_query()
     test_cli_selection_features()
+    test_ephemeral_mode_payload()
     print("\n" + "=" * 60)
     print(">>> ALL TESTS PASSED SUCCESSFULLY! <<<")
     print("=" * 60)

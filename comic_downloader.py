@@ -163,13 +163,15 @@ def get_api_key(cli_key: Optional[str] = None) -> Optional[str]:
 def call_virtual_middleware_ai(
     prompt: str,
     endpoint_url: str,
-    model: str = DEFAULT_MODEL
+    model: str = DEFAULT_MODEL,
+    ephemeral: bool = True
 ) -> Optional[List[Dict[str, Any]]]:
     """
     Calls the Antigravity Keyless Virtual Middleware Route.
     Architectural Principle: Zero Client Keys.
     Authorization is validated via the 128-bit slug in the URL path.
     Header 'Authorization: Bearer none' is transmitted.
+    Passes ephemeral=True (Mode C) so background queries do not pollute AGY chat/brain storage.
     """
     user_prompt = (
         f"You are an expert comic book archivist and historian. For the comic run, character, or storyline '{prompt}', "
@@ -195,7 +197,8 @@ def call_virtual_middleware_ai(
         ],
         "temperature": 0.2,
         "effort": "low",
-        "stream": False
+        "stream": False,
+        "ephemeral": ephemeral
     }
 
     headers = {
@@ -222,7 +225,8 @@ def call_authenticated_gateway_ai(
     prompt: str,
     api_key: str,
     url: str,
-    model: str = DEFAULT_MODEL
+    model: str = DEFAULT_MODEL,
+    ephemeral: bool = True
 ) -> Optional[List[Dict[str, Any]]]:
     """Fallback: Calls standard authenticated gateway with a secret Bearer key."""
     user_prompt = (
@@ -248,7 +252,8 @@ def call_authenticated_gateway_ai(
             {"role": "user", "content": user_prompt}
         ],
         "temperature": 0.2,
-        "effort": "low"
+        "effort": "low",
+        "ephemeral": ephemeral
     }
 
     headers = {
@@ -402,12 +407,13 @@ def fetch_comic_chronology_details(
     pub_slug: Optional[str] = None,
     api_key: Optional[str] = None,
     gateway_url: str = DEFAULT_GATEWAY_URL,
-    model: str = DEFAULT_MODEL
+    model: str = DEFAULT_MODEL,
+    ephemeral: bool = True
 ) -> List[Dict[str, Any]]:
     """
     Fetches reading order from Antigravity Virtual Middleware, Gateway API, or local agy CLI.
     Priority:
-      1. Safe Keyless Virtual Middleware Route (/p/{slug}/v1) [Zero Client Keys]
+      1. Safe Keyless Virtual Middleware Route (/p/{slug}/v1) [Zero Client Keys, Ephemeral Mode C]
       2. Authenticated Gateway Route (/v1) if secret key explicitly provided
       3. Google Gemini Direct API if AIza key provided
       4. Local Antigravity 'agy' CLI
@@ -418,8 +424,9 @@ def fetch_comic_chronology_details(
     # 1. Keyless Virtual Middleware Route (Zero Client Keys)
     virtual_url = resolve_virtual_middleware_url(endpoint=endpoint, pub_slug=pub_slug, gateway_url=gateway_url)
     clean_display = virtual_url.split("/chat/completions")[0]
-    print(f"    -> Querying Antigravity Keyless Virtual Middleware at {clean_display}...")
-    targets = call_virtual_middleware_ai(prompt=query, endpoint_url=virtual_url, model=model)
+    ephem_str = " (ephemeral=stateless)" if ephemeral else ""
+    print(f"    -> Querying Antigravity Keyless Virtual Middleware at {clean_display}{ephem_str}...")
+    targets = call_virtual_middleware_ai(prompt=query, endpoint_url=virtual_url, model=model, ephemeral=ephemeral)
     if targets:
         print(f"    [✓] Received {len(targets)} canonical issue(s) from Antigravity Virtual Middleware.")
         return targets
@@ -427,8 +434,8 @@ def fetch_comic_chronology_details(
     # 2. Authenticated Gateway Route (if secret key provided)
     if api_key and not api_key.startswith("AIza"):
         gw_completions_url = f"{gateway_url.rstrip('/')}/v1/chat/completions"
-        print(f"    -> Querying Antigravity Gateway (API Key Auth) at {gw_completions_url}...")
-        targets = call_authenticated_gateway_ai(prompt=query, api_key=api_key, url=gw_completions_url, model=model)
+        print(f"    -> Querying Antigravity Gateway (API Key Auth) at {gw_completions_url}{ephem_str}...")
+        targets = call_authenticated_gateway_ai(prompt=query, api_key=api_key, url=gw_completions_url, model=model, ephemeral=ephemeral)
         if targets:
             print(f"    [✓] Received {len(targets)} canonical issue(s) from Antigravity Gateway.")
             return targets
@@ -1499,7 +1506,8 @@ def run_comic_downloader(
     pub_slug: Optional[str] = None,
     api_key: Optional[str] = None,
     gateway_url: str = DEFAULT_GATEWAY_URL,
-    model: str = DEFAULT_MODEL
+    model: str = DEFAULT_MODEL,
+    ephemeral: bool = True
 ):
     """Complete user workflow for Antigravity Comic Chronology Downloader."""
     print("═" * 78)
@@ -1526,7 +1534,8 @@ def run_comic_downloader(
         pub_slug=pub_slug,
         api_key=resolved_key,
         gateway_url=gateway_url,
-        model=model
+        model=model,
+        ephemeral=ephemeral
     )
 
     # 3. Search open archives & sort chronologically
@@ -1592,15 +1601,30 @@ def main():
         default=DEFAULT_MODEL,
         help="Model name for Antigravity AI Advisor (default: gemini-2.5-flash)"
     )
+    parser.add_argument(
+        "--no-ephemeral",
+        dest="ephemeral",
+        action="store_false",
+        default=True,
+        help="Disable ephemeral mode (default: stateless Mode C, auto-cleans AGY brain chat storage)"
+    )
 
     args = parser.parse_args()
+
+    # Allow ANTIGRAVITY_EPHEMERAL env var to configure default if set
+    env_ephem = os.environ.get("ANTIGRAVITY_EPHEMERAL", "").strip().lower()
+    is_ephemeral = args.ephemeral
+    if env_ephem in ("0", "false", "no"):
+        is_ephemeral = False
+
     run_comic_downloader(
         query=args.query,
         endpoint=args.endpoint,
         pub_slug=args.pub_slug,
         api_key=args.api_key,
         gateway_url=args.gateway_url,
-        model=args.model
+        model=args.model,
+        ephemeral=is_ephemeral
     )
 
 

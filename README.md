@@ -9,6 +9,7 @@ Enter any comic title, character, storyline, or era (e.g. `X men Krakoa era`, `B
 
 Following the hardened architecture in `antigravity_server/Instruction`:
 - **No Secret Client Keys Stored**: Authorization is handled automatically via a high-entropy 128-bit public route slug (`/p/pub_.../v1`).
+- **Mode C: Zero-Clutter / Stateless ("Ephemeral")**: Automatically transmits `"ephemeral": True` so one-off comic lookup queries auto-delete immediately from AGY brain storage, keeping your Antigravity chat history 100% clean. (Can be toggled via `--no-ephemeral` or `ANTIGRAVITY_EPHEMERAL=false`).
 - **Token Drain Guard Compliance**: Uses `effort: "low"` and bounded payloads to prevent unnecessary compute exhaustion.
 - **Universal Connection**: Works seamlessly locally (`http://127.0.0.1:8000/p/<slug>/v1`), across home Wi-Fi LAN, or remotely over secure Cloudflare Tunnels (`https://<tunnel>.trycloudflare.com/p/<slug>/v1`).
 
