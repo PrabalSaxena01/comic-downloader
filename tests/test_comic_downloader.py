@@ -220,6 +220,15 @@ def test_cli_selection_features():
     finally:
         sys.stdin = saved_stdin
 
+    # Test interactive_checkbox_selector (covers shutil.get_terminal_size and TUI rendering)
+    from comic_downloader import interactive_checkbox_selector
+    from unittest.mock import patch
+    with patch("sys.stdin.isatty", return_value=True), \
+         patch("comic_downloader.get_terminal_key", return_value="ENTER"):
+        sel_interactive = interactive_checkbox_selector(mock_items, "House of X")
+        assert len(sel_interactive) == len(mock_items)
+        print("  [✓] Interactive TUI selector renders with terminal dimensions (shutil) and confirms.")
+
 def test_ephemeral_mode_payload():
     print("\n=== Test 11: Mode C Ephemeral Payload Structure ===")
     from unittest.mock import patch, MagicMock
