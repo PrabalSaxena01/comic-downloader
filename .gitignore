@@ -1,0 +1,22 @@
+# Environment variables and secrets
+.env
+
+# Downloaded comic archives and media
+downloads/
+*.cbz
+*.cbr
+*.pdf
+*.zip
+
+# Python cache & artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# IDE & OS files
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store

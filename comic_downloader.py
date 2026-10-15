@@ -1,0 +1,942 @@
+#!/usr/bin/env python3
+"""
+📚 Antigravity Comic Chronology Finder & Bulk Downloader
+=========================================================
+Features:
+  1. AI Reading Order & Archival Dossier:
+     Consults Antigravity (via API Key / Gateway or local agy CLI) to fetch canonical
+     chronological reading orders, creative teams, release years, and synopses.
+  2. Open Comic Archive Search:
+     Searches digital comic archives (Archive.org) for .cbz, .cbr, .pdf, and .zip issues.
+  3. Chronological Issue Display:
+     Sorts all discovered issues by release year and issue sequence.
+  4. Interactive Selection & Approval Gate:
+     Interactive terminal selector (Arrow keys + Spacebar, or number ranges) with a
+     mandatory confirmation prompt ('Click Yes' / [y/n]).
+  5. Automated Folder Organization & Streaming Download:
+     Creates a dedicated, suitably named folder and downloads all selected files with
+     live progress tracking.
+"""
+
+import os
+import sys
+import re
+import json
+import time
+import argparse
+import urllib.request
+import urllib.parse
+import urllib.error
+from pathlib import Path
+from typing import List, Dict, Any, Tuple, Optional
+
+# Ensure UTF-8 output on Windows consoles
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
+# Base Paths
+BASE_DIR = Path(__file__).resolve().parent
+DOWNLOADS_ROOT = BASE_DIR / "downloads"
+DOWNLOADS_ROOT.mkdir(parents=True, exist_ok=True)
+ENV_FILE = BASE_DIR / ".env"
+
+# Default Gateway Settings
+DEFAULT_GATEWAY_URL = os.getenv("ANTIGRAVITY_GATEWAY_URL", "http://127.0.0.1:8000")
+DEFAULT_MODEL = os.getenv("ANTIGRAVITY_MODEL", "gemini-2.5-flash")
+
+
+# ===================================================================
+# 1. Environment & API Key Management
+# ===================================================================
+
+def load_local_env() -> Dict[str, str]:
+    """Loads key-value pairs from local .env if present."""
+    env_vars = {}
+    if ENV_FILE.exists():
+        try:
+            with open(ENV_FILE, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        k, v = line.split("=", 1)
+                        env_vars[k.strip()] = v.strip().strip("'\"")
+        except Exception:
+            pass
+    return env_vars
+
+
+def save_key_to_env(key: str):
+    """Saves API key to .env file for future convenience."""
+    try:
+        lines = []
+        if ENV_FILE.exists():
+            with open(ENV_FILE, "r", encoding="utf-8") as f:
+                lines = [l for l in f.readlines() if not l.startswith("ANTIGRAVITY_APP_KEY=")]
+        lines.append(f"ANTIGRAVITY_APP_KEY={key}\n")
+        with open(ENV_FILE, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+        print(f"  [✓] Antigravity API Key saved to {ENV_FILE.name}")
+    except Exception as e:
+        print(f"  [!] Notice: Could not write key to .env ({e})")
+
+
+def get_api_key(cli_key: Optional[str] = None) -> Optional[str]:
+    """
+    Resolves the Antigravity API key from CLI args, environment, .env file,
+    or prompts the user.
+    """
+    def is_valid_key(k: Optional[str]) -> bool:
+        if not k:
+            return False
+        k = k.strip()
+        return bool(k and k != "your_antigravity_api_key_here" and not k.startswith("your_"))
+
+    if is_valid_key(cli_key):
+        return cli_key.strip()
+
+    # Check process env
+    env_key = os.getenv("ANTIGRAVITY_APP_KEY") or os.getenv("AGY_API_KEY")
+    if is_valid_key(env_key):
+        return env_key.strip()
+
+    # Check local .env file
+    local_env = load_local_env()
+    if is_valid_key(local_env.get("ANTIGRAVITY_APP_KEY")):
+        return local_env["ANTIGRAVITY_APP_KEY"].strip()
+    if is_valid_key(local_env.get("AGY_API_KEY")):
+        return local_env["AGY_API_KEY"].strip()
+
+    # Interactive prompt if running interactively
+    if sys.stdin.isatty():
+        print("\n" + "=" * 70)
+        print("  🔑 ANTIGRAVITY API KEY CONFIGURATION")
+        print("=" * 70)
+        print("  To consult Antigravity AI Advisor for canonical reading orders,")
+        print("  please enter your Antigravity API key.")
+        print("  (Or press ENTER to use the local 'agy' CLI / direct search fallback)\n")
+        try:
+            user_input = input("  Antigravity API Key: ").strip()
+            if user_input:
+                save_choice = input("  Save key to .env for future runs? [Y/n]: ").strip().lower()
+                if save_choice in ("", "y", "yes"):
+                    save_key_to_env(user_input)
+                return user_input
+        except (EOFError, KeyboardInterrupt):
+            pass
+
+    return None
+
+
+# ===================================================================
+# 2. Antigravity AI Advisor (Reading Order & Metadata)
+# ===================================================================
+
+def call_gateway_ai(
+    prompt: str,
+    api_key: Optional[str] = None,
+    gateway_url: str = DEFAULT_GATEWAY_URL,
+    model: str = DEFAULT_MODEL
+) -> Optional[List[Dict[str, Any]]]:
+    """
+    Calls the Antigravity Gateway API at gateway_url/v1/chat/completions.
+    Returns structured list of comic issues or None if server unreachable.
+    """
+    if not api_key:
+        return None
+
+    if api_key.startswith("AIza"):
+        url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+        active_model = model if model.startswith("gemini") else "gemini-2.5-flash"
+    else:
+        url = f"{gateway_url.rstrip('/')}/v1/chat/completions"
+        active_model = model
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+
+    system_prompt = (
+        "You are an expert comic book historian and archivist.\n"
+        "Analyze the user's comic request and provide a chronological breakdown of issues/runs.\n"
+        "Return ONLY a valid JSON array of objects, with NO surrounding explanation or markdown except ```json ... ```:\n"
+        "[\n"
+        "  {\n"
+        '    "title": "Exact Title of Issue or Story Arc",\n'
+        '    "year": 1987,\n'
+        '    "issue_num": 1,\n'
+        '    "author": "Frank Miller (Writer) & David Mazzucchelli (Artist)",\n'
+        '    "synopsis": "Plot summary and continuity significance.",\n'
+        '    "search_query": "specific archive search query keywords"\n'
+        "  }\n"
+        "]\n"
+    )
+
+    payload = {
+        "model": active_model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"Query: {prompt}"}
+        ],
+        "temperature": 0.2
+    }
+
+    try:
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers=headers,
+            method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=30) as res:
+            data = json.loads(res.read().decode())
+            content = data["choices"][0]["message"]["content"]
+            return parse_ai_json_targets(content)
+    except Exception as e:
+        # Gateway offline or endpoint failed
+        return None
+
+
+def call_agy_cli_advisor(prompt: str) -> Optional[List[Dict[str, Any]]]:
+    """
+    Invokes the local 'agy' CLI command to fetch structured reading order.
+    """
+    import subprocess
+    cli_prompt = (
+        f"You are a comic book archivist. For the comic run or title '{prompt}', "
+        "provide a list of canonical issues in chronological reading order as a pure JSON array. "
+        "Each object must have fields: 'title' (str), 'year' (int), 'issue_num' (int), "
+        "'author' (str), 'synopsis' (str), 'search_query' (str). "
+        "Output ONLY the JSON array without any other text or markdown wrapper."
+    )
+
+    try:
+        result = subprocess.run(
+            ["agy", "-p", cli_prompt, "--disable-slash-commands"],
+            capture_output=True,
+            text=True,
+            timeout=40
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return parse_ai_json_targets(result.stdout)
+    except Exception:
+        pass
+    return None
+
+
+def parse_ai_json_targets(content: str) -> List[Dict[str, Any]]:
+    """Extracts JSON list of targets from text content."""
+    json_match = re.search(r'\[\s*\{.*?\}\s*\]', content, re.DOTALL)
+    if json_match:
+        try:
+            items = json.loads(json_match.group(0))
+            if isinstance(items, list):
+                clean_items = []
+                for item in items:
+                    clean_items.append({
+                        "title": item.get("title", "Unknown Title"),
+                        "year": int(item.get("year", 0)) if str(item.get("year", 0)).isdigit() else 0,
+                        "issue_num": item.get("issue_num", 0),
+                        "author": item.get("author", "Unknown Creator"),
+                        "synopsis": item.get("synopsis", ""),
+                        "search_query": item.get("search_query") or item.get("title", "")
+                    })
+                return clean_items
+        except Exception:
+            pass
+    return []
+
+
+def fetch_comic_chronology_details(
+    query: str,
+    api_key: Optional[str] = None,
+    gateway_url: str = DEFAULT_GATEWAY_URL,
+    model: str = DEFAULT_MODEL
+) -> List[Dict[str, Any]]:
+    """
+    Fetches reading order from Antigravity Gateway API or local agy CLI.
+    Falls back to a direct search target if AI advisor is completely offline.
+    """
+    print(f"\n[*] Consulting Antigravity AI Advisor on '{query}'...")
+    
+    # Try Antigravity Gateway first if API key provided
+    if api_key:
+        print(f"    -> Querying Antigravity Gateway at {gateway_url}...")
+        targets = call_gateway_ai(query, api_key=api_key, gateway_url=gateway_url, model=model)
+        if targets:
+            print(f"    [✓] Received {len(targets)} canonical issue(s) from Antigravity Gateway.")
+            return targets
+
+    # Fallback to local agy CLI
+    print("    -> Querying local Antigravity 'agy' CLI...")
+    targets = call_agy_cli_advisor(query)
+    if targets:
+        print(f"    [✓] Received {len(targets)} canonical issue(s) from Antigravity CLI.")
+        return targets
+
+    # Fallback target directly from user query
+    print("    [!] AI advisor offline. Proceeding with direct archive search for query.")
+    return [{
+        "title": query,
+        "year": 0,
+        "issue_num": 0,
+        "author": "N/A",
+        "synopsis": "Direct user search query",
+        "search_query": query
+    }]
+
+
+# ===================================================================
+# 3. Open Comic Archive Search & File Discovery
+# ===================================================================
+
+def sanitize_folder_name(name: str) -> str:
+    """Removes invalid filesystem characters."""
+    clean = re.sub(r'[\\/*?:"<>|]', "", name).strip()
+    return re.sub(r'\s+', " ", clean)
+
+
+def extract_issue_number(text: str) -> Optional[float]:
+    """Extracts issue number from titles or filenames (e.g. #01, #404, 01 of 06, Issue 2)."""
+    # Pattern 1: #01, #404, # 01
+    m = re.search(r'#\s*(\d+(?:\.\d+)?)', text)
+    if m:
+        try:
+            return float(m.group(1))
+        except ValueError:
+            pass
+
+    # Pattern 2: Issue 01, Issue 404
+    m = re.search(r'\b(?:issue|iss|no)\.?\s*(\d+(?:\.\d+)?)', text, re.IGNORECASE)
+    if m:
+        try:
+            return float(m.group(1))
+        except ValueError:
+            pass
+
+    # Pattern 3: (01 of 06), (01.04)
+    m = re.search(r'\(#?\s*(\d+)\s*(?:of|\.|\/)\s*\d+\)', text, re.IGNORECASE)
+    if m:
+        try:
+            return float(m.group(1))
+        except ValueError:
+            pass
+
+    # Pattern 4: - 01.cbz, _001.cbr
+    m = re.search(r'[-_\s](\d{1,3})\.(?:cbz|cbr|pdf|zip)', text, re.IGNORECASE)
+    if m:
+        try:
+            return float(m.group(1))
+        except ValueError:
+            pass
+
+    return None
+
+
+def extract_year_from_text(text: str) -> Optional[int]:
+    """Finds publication year like (1987) or 1987 in text."""
+    m = re.search(r'\b(19\d\d|20\d\d)\b', text)
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def search_archive_org(query: str, max_results: int = 5) -> List[Dict[str, Any]]:
+    """Searches open comic archives on Archive.org."""
+    clean_q = re.sub(r'Vol\.\s*\d+', '', query, flags=re.IGNORECASE)
+    clean_q = re.sub(r'[#:\(\)]', ' ', clean_q).strip()
+    words = clean_q.split()[:5]
+    search_term = " ".join(words)
+    encoded = urllib.parse.quote(search_term)
+
+    url = (
+        f"https://archive.org/advancedsearch.php?"
+        f"q=mediatype:texts+AND+title:({encoded})"
+        f"&fl[]=identifier,title,downloads,year,description"
+        f"&sort[]=downloads+desc&rows={max_results}&output=json"
+    )
+
+    req = urllib.request.Request(url, headers={"User-Agent": "AntigravityComicChronology/3.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=12) as res:
+            data = json.loads(res.read().decode())
+            return data.get("response", {}).get("docs", [])
+    except Exception as e:
+        return []
+
+
+def get_archive_files_for_item(identifier: str) -> List[Dict[str, Any]]:
+    """Fetches all valid downloadable comic files (.cbz, .cbr, .pdf, .zip) from an item."""
+    meta_url = f"https://archive.org/metadata/{identifier}/files"
+    req = urllib.request.Request(meta_url, headers={"User-Agent": "AntigravityComicChronology/3.0"})
+
+    files_list = []
+    try:
+        with urllib.request.urlopen(req, timeout=12) as res:
+            data = json.loads(res.read().decode())
+            files = data.get("result", [])
+
+            for f in files:
+                name = f.get("name", "")
+                ext = name.lower().split(".")[-1] if "." in name else ""
+                if ext in ["cbz", "cbr", "pdf", "zip"]:
+                    # Filter out non-comic archives or auxiliary derivative files
+                    if any(bad in name.lower() for bad in ["_daisy", "_thumb", "_jp2.zip", "meta.xml", "files.xml"]):
+                        continue
+                    size_bytes = int(f.get("size", 0) or 0)
+                    size_mb = round(size_bytes / (1024 * 1024), 2)
+                    if size_mb < 0.5:
+                        continue
+
+                    files_list.append({
+                        "name": name,
+                        "format": ext.upper(),
+                        "size_mb": size_mb,
+                        "download_url": f"https://archive.org/download/{identifier}/{name}"
+                    })
+    except Exception:
+        pass
+    return files_list
+
+
+def discover_available_comics(
+    query: str,
+    ai_targets: List[Dict[str, Any]]
+) -> Tuple[List[Dict[str, Any]], str]:
+    """
+    Searches open comic archives for the run and individual issues,
+    extracts files, associates metadata, and sorts chronologically.
+    """
+    print(f"\n[*] Searching open comic archives for available issues...")
+    discovered = []
+    seen_urls = set()
+    seen_filenames = set()
+    discovered_identifiers = set()
+    best_by_group = {}
+
+    # Collect search terms: overall query first, then AI targets
+    search_queries = [query]
+    for target in ai_targets:
+        sq = target.get("search_query")
+        if sq and sq.lower() != query.lower() and sq not in search_queries:
+            search_queries.append(sq)
+
+    for s_idx, q in enumerate(search_queries[:6], 1):
+        print(f"    [{s_idx}/{min(len(search_queries), 6)}] Searching: '{q}'...")
+        docs = search_archive_org(q, max_results=4)
+        for doc in docs:
+            ident = doc.get("identifier")
+            if not ident or ident in discovered_identifiers:
+                continue
+            discovered_identifiers.add(ident)
+            doc_title = doc.get("title", ident)
+            doc_year = doc.get("year")
+            if not doc_year:
+                doc_year = extract_year_from_text(doc_title) or 0
+            else:
+                try:
+                    doc_year = int(doc_year)
+                except ValueError:
+                    doc_year = 0
+
+            # Get files for this item
+            item_files = get_archive_files_for_item(ident)
+            for f in item_files:
+                if f["download_url"] in seen_urls:
+                    continue
+                seen_urls.add(f["download_url"])
+
+                # De-duplicate by normalized filename
+                norm_name = re.sub(r'[\s_\-]+', '_', f["name"].lower().strip())
+                if norm_name in seen_filenames:
+                    continue
+                seen_filenames.add(norm_name)
+
+                file_issue_num = extract_issue_number(f["name"]) or extract_issue_number(doc_title) or 0
+                file_year = extract_year_from_text(f["name"]) or doc_year
+
+                # Attempt to match with AI target metadata
+                matched_target = None
+                for target in ai_targets:
+                    t_issue = target.get("issue_num", 0)
+                    if t_issue and file_issue_num and int(t_issue) == int(file_issue_num):
+                        matched_target = target
+                        break
+
+                if not matched_target and ai_targets:
+                    # Match by name or default to first target
+                    for target in ai_targets:
+                        t_title = target.get("title", "").lower()
+                        if any(w in f["name"].lower() for w in t_title.split()[:2]):
+                            matched_target = target
+                            break
+
+                final_year = file_year or (matched_target.get("year", 0) if matched_target else 0)
+                final_author = matched_target.get("author", "N/A") if matched_target else "N/A"
+                final_synopsis = matched_target.get("synopsis", "") if matched_target else ""
+                display_title = (
+                    f"#{int(file_issue_num)}: {matched_target.get('title')}"
+                    if matched_target and file_issue_num
+                    else f.get("name")
+                )
+                # Format Prioritization: CBZ (1) > CBR (2) > ZIP (3) > PDF (4, Fallback)
+                format_ranks = {"CBZ": 1, "CBR": 2, "ZIP": 3, "PDF": 4}
+                file_fmt = f["format"].upper()
+                fmt_rank = format_ranks.get(file_fmt, 99)
+
+                clean_stem = re.sub(r'[\s_\-]+', '_', Path(f["name"]).stem.lower())
+                clean_stem = re.sub(r'\([^\)]*\)', '', clean_stem).strip('_')
+                if file_issue_num and file_issue_num > 0:
+                    group_key = f"issue_{int(file_issue_num)}"
+                else:
+                    group_key = f"stem_{clean_stem}"
+
+                item_entry = {
+                    "filename": f["name"],
+                    "display_title": display_title,
+                    "format": file_fmt,
+                    "fmt_rank": fmt_rank,
+                    "size_mb": f["size_mb"],
+                    "download_url": f["download_url"],
+                    "year": final_year,
+                    "issue_num": file_issue_num,
+                    "author": final_author,
+                    "synopsis": final_synopsis,
+                    "archive_title": doc_title,
+                    "identifier": ident,
+                    "is_fallback_pdf": (file_fmt == "PDF")
+                }
+
+                # If we haven't seen this issue/stem yet, or new format has higher priority (lower rank)
+                if group_key not in best_by_group:
+                    best_by_group[group_key] = item_entry
+                else:
+                    existing_entry = best_by_group[group_key]
+                    if fmt_rank < existing_entry["fmt_rank"]:
+                        best_by_group[group_key] = item_entry
+
+    discovered = list(best_by_group.values())
+
+    # Sort in chronological order (Year ascending, Issue Number ascending)
+    discovered.sort(key=lambda x: (
+        x["year"] if x["year"] and x["year"] > 1900 else 9999,
+        x["issue_num"] if x["issue_num"] else 9999,
+        x["fmt_rank"],
+        x["filename"].lower()
+    ))
+
+    # Determine recommended folder name
+    first_year = next((d["year"] for d in discovered if d["year"] and d["year"] > 1900), None)
+    year_tag = f" ({first_year})" if first_year else ""
+    folder_name = sanitize_folder_name(f"{query.title()}{year_tag}")
+
+    return discovered, folder_name
+
+
+# ===================================================================
+# 4. Interactive Selection & Approval Gate ("Click Yes")
+# ===================================================================
+
+def get_terminal_key() -> str:
+    """Reads a single keypress from terminal across Windows, macOS, and Linux."""
+    if os.name == "nt":
+        import msvcrt
+        key = msvcrt.getwch()
+        if key in ("\x00", "\xe0"):
+            key2 = msvcrt.getwch()
+            if key2 == "H":
+                return "UP"
+            if key2 == "P":
+                return "DOWN"
+        if key == " ":
+            return "SPACE"
+        if key in ("\r", "\n"):
+            return "ENTER"
+        if key == "\x1b":
+            return "ESC"
+        return key.lower()
+    else:
+        import termios
+        import tty
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        try:
+            tty.setraw(fd)
+            ch = sys.stdin.read(1)
+            if ch == "\x1b":
+                ch2 = sys.stdin.read(1)
+                if ch2 == "[":
+                    ch3 = sys.stdin.read(1)
+                    if ch3 == "A":
+                        return "UP"
+                    if ch3 == "B":
+                        return "DOWN"
+                return "ESC"
+            if ch == " ":
+                return "SPACE"
+            if ch in ("\r", "\n"):
+                return "ENTER"
+            return ch.lower()
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+
+def clear_screen():
+    """Clears terminal screen."""
+    os.system("cls" if os.name == "nt" else "clear")
+
+
+def interactive_checkbox_selector(items: List[Dict[str, Any]], default_folder: str) -> List[Dict[str, Any]]:
+    """
+    Renders an interactive TUI selector with checkboxes:
+      ↑/↓    : Move cursor
+      SPACE  : Tick / Untick
+      A      : Select All
+      N      : Select None
+      ENTER  : Confirm Selection
+      Q      : Cancel / Exit
+    """
+    if not items:
+        return []
+
+    # Default: select all
+    selected = [True] * len(items)
+    cursor = 0
+
+    # Fallback to plain prompt if not a real interactive terminal
+    if not sys.stdin.isatty():
+        return plain_text_selector(items)
+
+    while True:
+        clear_screen()
+        print("═" * 78)
+        print("  📚 SELECT COMICS TO DOWNLOAD (CHRONOLOGICAL ORDER)")
+        print("═" * 78)
+        print("  [↑ / ↓] Move Cursor   |  [SPACE] Toggle [x]/[ ]  |  [A] Select All")
+        print("  [N] Deselect None     |  [ENTER] Confirm (Yes)   |  [Q] Cancel")
+        print("─" * 78)
+
+        total_selected = sum(selected)
+        total_size_mb = sum(items[i]["size_mb"] for i in range(len(items)) if selected[i])
+        print(f"  Selected: {total_selected} of {len(items)} comics | Total Size: {total_size_mb:.1f} MB")
+        print("─" * 78)
+
+        # Show visible window of items if list is long
+        max_rows = 15
+        start_idx = max(0, min(cursor - max_rows // 2, len(items) - max_rows))
+        end_idx = min(len(items), start_idx + max_rows)
+
+        if start_idx > 0:
+            print(f"  ... ({start_idx} earlier items above) ...")
+
+        for i in range(start_idx, end_idx):
+            item = items[i]
+            pointer = "▶" if i == cursor else " "
+            checkbox = "[x]" if selected[i] else "[ ]"
+            year_str = f"[{item['year']}] " if item["year"] else ""
+            num_str = f"#{int(item['issue_num']):02d} " if item["issue_num"] else ""
+            size_fmt = f"[{item['format']} | {item['size_mb']:5.1f} MB]"
+            
+            line = f"  {pointer} {checkbox} {i+1:2d}. {year_str}{num_str}{item['filename'][:40]} {size_fmt}"
+            print(line)
+
+        if end_idx < len(items):
+            print(f"  ... ({len(items) - end_idx} more items below) ...")
+
+        print("═" * 78)
+        print("  Press ENTER when done to approve and proceed with download.")
+
+        key = get_terminal_key()
+
+        if key == "UP":
+            cursor = (cursor - 1) % len(items)
+        elif key == "DOWN":
+            cursor = (cursor + 1) % len(items)
+        elif key == "SPACE":
+            selected[cursor] = not selected[cursor]
+        elif key == "a":
+            selected = [True] * len(items)
+        elif key == "n":
+            selected = [False] * len(items)
+        elif key in ("q", "esc"):
+            print("\n[-] Selection cancelled by user.")
+            return []
+        elif key == "ENTER":
+            if not any(selected):
+                print("\n  [!] No comics selected. Press SPACE on an item to select it, or A for all.")
+                time.sleep(1.2)
+                continue
+            return [items[i] for i in range(len(items)) if selected[i]]
+
+
+def plain_text_selector(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Fallback selector for environments without raw tty capability."""
+    print("\n" + "═" * 78)
+    print("  📚 AVAILABLE COMICS (CHRONOLOGICAL ORDER)")
+    print("═" * 78)
+    for idx, item in enumerate(items, 1):
+        year_str = f"[{item['year']}] " if item["year"] else ""
+        num_str = f"#{int(item['issue_num']):02d} " if item["issue_num"] else ""
+        print(f"  {idx:2d}. {year_str}{num_str}{item['filename']} [{item['format']} | {item['size_mb']} MB]")
+    print("═" * 78)
+    print("  Enter item numbers to download (e.g. '1, 2, 4-6' or 'all'): ")
+    try:
+        choice = input("  Selection: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return []
+
+    if choice in ("", "all"):
+        return items
+    if choice in ("none", "q", "quit"):
+        return []
+
+    selected_indices = set()
+    parts = choice.split(",")
+    for p in parts:
+        p = p.strip()
+        if "-" in p:
+            sub = p.split("-", 1)
+            try:
+                start, end = int(sub[0]), int(sub[1])
+                for x in range(start, end + 1):
+                    if 1 <= x <= len(items):
+                        selected_indices.add(x - 1)
+            except ValueError:
+                pass
+        else:
+            try:
+                val = int(p)
+                if 1 <= val <= len(items):
+                    selected_indices.add(val - 1)
+            except ValueError:
+                pass
+
+    return [items[i] for i in sorted(selected_indices)]
+
+
+def confirm_approval_gate(selected_files: List[Dict[str, Any]], folder_name: str) -> bool:
+    """
+    Final approval gate: Displays selected list, destination directory,
+    and asks user to confirm ('Click Yes' / [y/n]).
+    """
+    clear_screen()
+    print("\n" + "═" * 78)
+    print("  ✅ DOWNLOAD CONFIRMATION & APPROVAL GATE")
+    print("═" * 78)
+    target_path = DOWNLOADS_ROOT / folder_name
+    total_mb = sum(f["size_mb"] for f in selected_files)
+
+    print(f"  Target Run Folder : {target_path}")
+    print(f"  Comics Selected   : {len(selected_files)} issue(s)")
+    print(f"  Total Download    : {total_mb:.1f} MB")
+    print("─" * 78)
+    print("  Selected Issues to Download:")
+    for i, f in enumerate(selected_files[:10], 1):
+        year_tag = f"({f['year']}) " if f["year"] else ""
+        print(f"    {i:2d}. {year_tag}{f['filename']} ({f['size_mb']} MB)")
+    if len(selected_files) > 10:
+        print(f"    ... and {len(selected_files) - 10} more issue(s)")
+    print("═" * 78)
+
+    prompt = "  Ready to create folder and download all selected comics? [Y/n] (Click Yes): "
+    try:
+        decision = input(prompt).strip().lower()
+        if decision in ("", "y", "yes", "true", "1"):
+            return True
+        else:
+            print("\n[-] Download cancelled by user.")
+            return False
+    except (EOFError, KeyboardInterrupt):
+        print("\n[-] Cancelled.")
+        return False
+
+
+# ===================================================================
+# 5. Streaming Downloader & Progress Bar
+# ===================================================================
+
+def download_file_with_progress(url: str, dest_path: Path) -> bool:
+    """Downloads a file with an active ASCII progress bar."""
+    if dest_path.exists() and dest_path.stat().st_size > 1000:
+        print(f"  [✓] File already exists: {dest_path.name}")
+        return True
+
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    req = urllib.request.Request(url, headers={"User-Agent": "AntigravityComicChronology/3.0"})
+
+    try:
+        with urllib.request.urlopen(req, timeout=40) as res:
+            total_bytes = int(res.headers.get("content-length", 0))
+            downloaded = 0
+            chunk_size = 64 * 1024
+            start_time = time.time()
+
+            with open(dest_path, "wb") as f:
+                while True:
+                    chunk = res.read(chunk_size)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    downloaded += len(chunk)
+
+                    if total_bytes > 0:
+                        pct = int((downloaded / total_bytes) * 100)
+                        done_mb = downloaded / (1024 * 1024)
+                        total_mb = total_bytes / (1024 * 1024)
+                        speed = done_mb / max(0.1, (time.time() - start_time))
+                        bar_len = 20
+                        filled = int(bar_len * downloaded // total_bytes)
+                        bar = "#" * filled + "-" * (bar_len - filled)
+                        sys.stdout.write(f"\r    [{bar}] {pct:3d}% | {done_mb:5.1f}/{total_mb:5.1f} MB | {speed:4.1f} MB/s")
+                        sys.stdout.flush()
+
+            sys.stdout.write("\n")
+            return True
+    except Exception as e:
+        print(f"\n    [!] Download failed: {e}")
+        if dest_path.exists():
+            dest_path.unlink()
+        return False
+
+
+def execute_bulk_downloads(selected_files: List[Dict[str, Any]], folder_name: str):
+    """Creates the target folder and downloads all approved comics."""
+    target_dir = DOWNLOADS_ROOT / folder_name
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    print("\n" + "═" * 78)
+    print(f"  🚀 STARTING DOWNLOADS TO: {target_dir}")
+    print("═" * 78)
+
+    successful = 0
+    failed = []
+
+    for idx, item in enumerate(selected_files, 1):
+        filename = item["filename"]
+        dest = target_dir / filename
+        print(f"\n  [{idx}/{len(selected_files)}] Downloading: {filename} ({item['size_mb']} MB)")
+        ok = download_file_with_progress(item["download_url"], dest)
+        if ok:
+            successful += 1
+        else:
+            failed.append(filename)
+
+    print("\n" + "═" * 78)
+    print("  🎉 DOWNLOAD BATCH COMPLETE")
+    print("═" * 78)
+    print(f"  Saved to Directory: {target_dir}")
+    print(f"  Successful        : {successful} / {len(selected_files)}")
+    if failed:
+        print(f"  Failed            : {len(failed)}")
+        for f in failed:
+            print(f"    - {f}")
+    print("═" * 78 + "\n")
+
+
+# ===================================================================
+# 6. Main Orchestrator
+# ===================================================================
+
+def run_comic_downloader(
+    query: Optional[str] = None,
+    api_key: Optional[str] = None,
+    gateway_url: str = DEFAULT_GATEWAY_URL,
+    model: str = DEFAULT_MODEL
+):
+    """Complete user workflow for Antigravity Comic Chronology Downloader."""
+    print("═" * 78)
+    print("        📚 Antigravity Comic Chronology Finder & Downloader")
+    print("═" * 78)
+
+    # 1. Resolve User Query
+    if not query:
+        if sys.stdin.isatty():
+            try:
+                query = input("\n  Enter comic name, comic run, or storyline: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print("\n[-] Exiting.")
+                return
+        else:
+            print("[-] No query provided. Pass comic query as argument.")
+            return
+
+    if not query:
+        print("[-] Empty query. Exiting.")
+        return
+
+    # 2. Resolve API Key
+    resolved_key = get_api_key(api_key)
+
+    # 3. Antigravity AI Advisor fetches reading order & canonical issue details
+    ai_targets = fetch_comic_chronology_details(
+        query=query,
+        api_key=resolved_key,
+        gateway_url=gateway_url,
+        model=model
+    )
+
+    # 4. Search open archives & sort chronologically
+    available_comics, folder_name = discover_available_comics(query, ai_targets)
+
+    if not available_comics:
+        print(f"\n[-] No downloadable comic files (.cbz, .cbr, .pdf) found for '{query}'.")
+        print("    Try adjusting the search query or using a specific character/issue name.\n")
+        return
+
+    # 5. Interactive Selection
+    selected_comics = interactive_checkbox_selector(available_comics, folder_name)
+    if not selected_comics:
+        print("[-] No comics selected for download.\n")
+        return
+
+    # 6. User Approval Confirmation ("Click Yes")
+    approved = confirm_approval_gate(selected_comics, folder_name)
+    if not approved:
+        return
+
+    # 7. Create Folder and Download
+    execute_bulk_downloads(selected_comics, folder_name)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Antigravity Comic Chronology Finder & Bulk Downloader"
+    )
+    parser.add_argument(
+        "query",
+        nargs="?",
+        default=None,
+        help="Comic name, run, or storyline (e.g. 'Batman Year One', 'Spider-Man Blue')"
+    )
+    parser.add_argument(
+        "--key",
+        dest="api_key",
+        default=None,
+        help="Antigravity API key"
+    )
+    parser.add_argument(
+        "--gateway",
+        dest="gateway_url",
+        default=DEFAULT_GATEWAY_URL,
+        help="Antigravity Gateway URL (default: http://127.0.0.1:8000)"
+    )
+    parser.add_argument(
+        "--model",
+        dest="model",
+        default=DEFAULT_MODEL,
+        help="Model name for Antigravity AI Advisor"
+    )
+
+    args = parser.parse_args()
+    run_comic_downloader(
+        query=args.query,
+        api_key=args.api_key,
+        gateway_url=args.gateway_url,
+        model=args.model
+    )
+
+
+if __name__ == "__main__":
+    main()
